@@ -157,6 +157,8 @@ pub struct Style {
     pub show_keys: bool,
     pub zoom_speed: f32, // 0 slow .. 1 fast
     pub motion_blur: bool,
+    pub sys_volume: f32,
+    pub mic_volume: f32,
 }
 
 impl Default for Style {
@@ -175,6 +177,8 @@ impl Default for Style {
             show_keys: true,
             zoom_speed: 0.5,
             motion_blur: true,
+            sys_volume: 1.0,
+            mic_volume: 1.0,
         }
     }
 }
@@ -232,6 +236,8 @@ impl Project {
                 show_keys: s.bool_or("show_keys", d.show_keys),
                 zoom_speed: s.f32_or("zoom_speed", d.zoom_speed).clamp(0.0, 1.0),
                 motion_blur: s.bool_or("motion_blur", d.motion_blur),
+                sys_volume: s.f32_or("sys_volume", d.sys_volume).clamp(0.0, 2.0),
+                mic_volume: s.f32_or("mic_volume", d.mic_volume).clamp(0.0, 2.0),
             };
         }
         self.zooms = j
@@ -263,7 +269,9 @@ impl Project {
             .set("click_effect", s.click_effect as u32)
             .set("show_keys", s.show_keys)
             .set("zoom_speed", s.zoom_speed)
-            .set("motion_blur", s.motion_blur);
+            .set("motion_blur", s.motion_blur)
+            .set("sys_volume", s.sys_volume)
+            .set("mic_volume", s.mic_volume);
         let zooms = self
             .zooms
             .iter()

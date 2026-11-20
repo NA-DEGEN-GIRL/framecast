@@ -40,6 +40,8 @@ pub struct EncoderConfig {
     pub height: u32,
     pub fps: u32,
     pub bitrate: u32,
+    /// Adds a 48 kHz stereo AAC track fed by `submit_audio`.
+    pub audio: bool,
 }
 
 /// Number of textures the encoder may hold at once. The capture/render side
@@ -49,6 +51,7 @@ const RING: usize = 6;
 pub struct Encoder {
     writer: IMFSinkWriter,
     stream: u32,
+    audio_stream: Option<u32>,
     _mgr: IMFDXGIDeviceManager,
     ring: Vec<ID3D11Texture2D>,
     next: usize,
@@ -88,6 +91,29 @@ impl Encoder {
             inp.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack(1, 1)).ctx("par")?;
             inp.SetUINT32(&MF_MT_DEFAULT_STRIDE, cfg.width * 4).ctx("stride")?;
             writer.SetInputMediaType(stream, &inp, None).ctx("SetInputMediaType")?;
+            let audio_stream = if cfg.audio {
+                let rate = crate::audio::MIX_RATE;
+                let out = MFCreateMediaType().ctx("audio type")?;
+                out.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).ctx("major")?;
+                out.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC).ctx("aac")?;
+                out.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16).ctx("bits")?;
+                out.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, rate).ctx("rate")?;
+                out.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, 2).ctx("channels")?;
+                out.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 24_000).ctx("aac bitrate")?;
+                let s = writer.AddStream(&out).ctx("AddStream audio")?;
+                let inp = MFCreateMediaType().ctx("pcm type")?;
+                inp.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).ctx("major")?;
+                inp.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM).ctx("pcm")?;
+                inp.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16).ctx("bits")?;
+                inp.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, rate).ctx("rate")?;
+                inp.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, 2).ctx("channels")?;
+                inp.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, 4).ctx("align")?;
+                inp.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, rate * 4).ctx("bytes")?;
+                writer.SetInputMediaType(s, &inp, None).ctx("SetInputMediaType audio")?;
+                Some(s)
+            } else {
+                None
+            };
             writer.BeginWriting().ctx("BeginWriting")?;
 
             let mut ring = Vec::with_capacity(RING);
@@ -103,6 +129,7 @@ impl Encoder {
             Ok(Encoder {
                 writer,
                 stream,
+                audio_stream,
                 _mgr: mgr,
                 ring,
                 next: 0,
@@ -146,6 +173,29 @@ impl Encoder {
         }
         self.submitted += 1;
         Ok(())
+    }
+
+    /// Interleaved 16-bit stereo PCM at MIX_RATE.
+    pub fn submit_audio(&mut self, pcm: &[i16], time_hns: i64) -> Res<()> {
+        let Some(stream) = self.audio_stream else { return Ok(()) };
+        if pcm.is_empty() {
+            return Ok(());
+        }
+        unsafe {
+            let bytes = pcm.len() * 2;
+            let buf = MFCreateMemoryBuffer(bytes as u32).ctx("audio buffer")?;
+            let mut p = std::ptr::null_mut();
+            buf.Lock(&mut p, None, None).ctx("Lock")?;
+            std::ptr::copy_nonoverlapping(pcm.as_ptr() as *const u8, p, bytes);
+            buf.Unlock().ctx("Unlock")?;
+            buf.SetCurrentLength(bytes as u32).ctx("len")?;
+            let s = MFCreateSample().ctx("sample")?;
+            s.AddBuffer(&buf).ctx("AddBuffer")?;
+            let frames = (pcm.len() / 2) as i64;
+            s.SetSampleTime(time_hns).ctx("time")?;
+            s.SetSampleDuration(frames * 10_000_000 / crate::audio::MIX_RATE as i64).ctx("duration")?;
+            self.writer.WriteSample(stream, &s).ctx("WriteSample audio")
+        }
     }
 
     pub fn finish(self) -> Res<()> {

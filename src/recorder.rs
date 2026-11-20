@@ -24,6 +24,8 @@ pub struct RecordOptions {
     pub monitor: Monitor,
     pub fps: u32,
     pub all_keys: bool,
+    pub system_audio: bool,
+    pub mic: bool,
 }
 
 pub struct ActiveRecording {
@@ -86,7 +88,7 @@ fn record_thread(
         let h = cap.height & !1;
         let px_rate = w as f64 * h as f64 * opts.fps as f64;
         let bitrate = (px_rate * 0.14).clamp(8e6, 90e6) as u32;
-        let enc = Encoder::new(&gpu, &dir.join("raw.mp4"), &EncoderConfig { width: w, height: h, fps: opts.fps, bitrate })?;
+        let enc = Encoder::new(&gpu, &dir.join("raw.mp4"), &EncoderConfig { width: w, height: h, fps: opts.fps, bitrate, audio: false })?;
         let latest = gpu.texture(w, h, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, false)?;
         Ok((gpu, cap, enc, latest, w, h))
     })();
@@ -112,6 +114,13 @@ fn record_thread(
 
     let start = now_hns();
     let input = InputLogger::start(start, origin, opts.all_keys, stop.clone());
+    let mut audio = Vec::new();
+    if opts.system_audio {
+        audio.push(crate::audio::Capture::start(crate::audio::Source::System, &dir, start));
+    }
+    if opts.mic {
+        audio.push(crate::audio::Capture::start(crate::audio::Source::Mic, &dir, start));
+    }
     let _ = started.send(Ok(start));
     log!("recording {}x{} @{}fps -> {}", w, h, opts.fps, dir.display());
 
@@ -167,6 +176,9 @@ fn record_thread(
     }
     let duration = (idx * period) as f64 / 1e7;
     let log = input.finish();
+    for a in audio {
+        a.finish();
+    }
     drop(cap);
     let fin = enc.finish();
     result?;

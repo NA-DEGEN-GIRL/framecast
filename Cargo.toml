@@ -33,6 +33,7 @@ features = [
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Imaging",
     "Win32_Graphics_Imaging_D2D",
+    "Win32_Media_Audio",
     "Win32_Media_MediaFoundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",

@@ -48,6 +48,9 @@ pub struct App {
     fps_sel: usize,
     countdown: bool,
     all_keys: bool,
+    sys_audio: bool,
+    mic: bool,
+    has_mic: bool,
     recents: Vec<(PathBuf, String, f64)>,
     toast: Option<(String, Instant, bool)>,
     bar: Option<Surface>,
@@ -102,6 +105,9 @@ impl App {
             fps_sel: 1,
             countdown: true,
             all_keys: false,
+            sys_audio: true,
+            mic: false,
+            has_mic: crate::audio::has_device(crate::audio::Source::Mic),
             recents: project::recent_projects(),
             toast: None,
             bar: None,
@@ -208,7 +214,13 @@ impl App {
                     self.toast("No display found", true);
                     return Ok(());
                 };
-                let opts = RecordOptions { monitor: mon.clone(), fps: [30, 60][self.fps_sel], all_keys: self.all_keys };
+                let opts = RecordOptions {
+                    monitor: mon.clone(),
+                    fps: [30, 60][self.fps_sel],
+                    all_keys: self.all_keys,
+                    system_audio: self.sys_audio,
+                    mic: self.mic && self.has_mic,
+                };
                 self.main.show(SW_HIDE);
                 if self.countdown {
                     let s = self.main.dpi_scale();
@@ -400,7 +412,7 @@ impl App {
         let right = Rect::new(right.x + gap, right.y, right.w - gap, right.h);
 
         // New recording card.
-        let card_h = ui.px(440.0).min(left.h);
+        let card_h = ui.px(520.0).min(left.h);
         let card = Rect::new(left.x, left.y, left.w, card_h);
         ui.fill(d2d, card, ui.px(14.0), rgba(PANEL, 1.0));
         ui.stroke(d2d, card, ui.px(14.0), rgba(BORDER, 1.0), 1.0);
@@ -433,6 +445,14 @@ impl App {
         ui.toggle(d2d, id("countdown"), r, "3-second countdown", &mut self.countdown);
         let (r, c) = c.cut_top(ui.px(36.0));
         ui.toggle(d2d, id("allkeys"), r, "Record all keys (default: shortcuts only)", &mut self.all_keys);
+        let (r, c) = c.cut_top(ui.px(36.0));
+        ui.toggle(d2d, id("sysaudio"), r, "Record system audio", &mut self.sys_audio);
+        let (r, c) = c.cut_top(ui.px(36.0));
+        if self.has_mic {
+            ui.toggle(d2d, id("mic"), r, "Record microphone", &mut self.mic);
+        } else {
+            ui.text(d2d, r, "No microphone found", 13.0, W_NORMAL, rgba(FAINT, 1.0), Align::Left);
+        }
         let (_, c) = c.cut_top(ui.px(16.0));
         let (r, c) = c.cut_top(ui.px(52.0));
         if ui.button(d2d, id("record"), r, "●   Start recording", ButtonKind::Danger) {
@@ -546,6 +566,9 @@ struct Editor {
     export_result: Option<Res<PathBuf>>,
     side_scroll: f32,
     title: String,
+    tracks: crate::audio::Tracks,
+    player: Option<crate::audio::Player>,
+    volumes: std::sync::Arc<std::sync::Mutex<(f32, f32)>>,
 }
 
 impl Editor {
@@ -558,7 +581,12 @@ impl Editor {
         let snap = Snap { style: p.style.clone(), zooms: p.zooms.clone(), trim: (p.trim_start, p.trim_end) };
         let title = pretty_name(&dir.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
         let t = p.trim_start;
+        let tracks = crate::audio::Tracks::load(dir);
+        let volumes = std::sync::Arc::new(std::sync::Mutex::new((p.style.sys_volume, p.style.mic_volume)));
         Ok(Editor {
+            tracks,
+            player: None,
+            volumes,
             p,
             motion,
             motion_key: snap.clone(),
@@ -652,6 +680,19 @@ impl Editor {
                 self.t = self.p.trim_end;
                 self.playing = false;
             }
+        }
+
+        // Preview audio follows the play state.
+        *self.volumes.lock().unwrap() = (self.p.style.sys_volume, self.p.style.mic_volume);
+        if self.playing && self.player.is_none() && !self.tracks.is_empty() {
+            self.player = Some(crate::audio::Player::start(crate::audio::PlayParams {
+                tracks: self.tracks.clone(),
+                start: self.t,
+                end: self.p.trim_end,
+                volumes: self.volumes.clone(),
+            }));
+        } else if !self.playing {
+            self.player = None;
         }
 
         let snap = self.snap();
@@ -940,6 +981,21 @@ impl Editor {
             y += ui.px(14.0);
         }
         y += ui.px(22.0);
+
+        if !self.tracks.is_empty() {
+            ui.section(d2d, row(&mut y, ui.px(24.0)), "Audio");
+            let st = &mut self.p.style;
+            let vol = |v: f32| if v <= 0.001 { "Muted".to_string() } else { format!("{:.0}%", v * 100.0) };
+            if self.tracks.system.is_some() {
+                ui.slider(d2d, id("sysvol"), row(&mut y, ui.px(40.0)), "System audio", &mut st.sys_volume, 0.0, 2.0, &vol);
+                y += gap * 0.5;
+            }
+            if self.tracks.mic.is_some() {
+                ui.slider(d2d, id("micvol"), row(&mut y, ui.px(40.0)), "Microphone", &mut st.mic_volume, 0.0, 2.0, &vol);
+                y += gap * 0.5;
+            }
+            y += ui.px(16.0);
+        }
 
         ui.section(d2d, row(&mut y, ui.px(24.0)), "Keystrokes");
         let st = &mut self.p.style;

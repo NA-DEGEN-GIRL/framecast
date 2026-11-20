@@ -73,7 +73,10 @@ pub fn run(p: &Project, out: &std::path::Path, progress: &AtomicU32, cancel: &At
     let motion = Motion::build(p);
     let fps = p.rec.fps.clamp(24, 60);
     let bitrate = ((w * h) as f64 * fps as f64 * 0.11).clamp(6e6, 60e6) as u32;
-    let mut enc = Encoder::new(&gpu, out, &EncoderConfig { width: w, height: h, fps, bitrate })?;
+    let tracks = crate::audio::Tracks::load(&p.dir);
+    let audio = !tracks.is_empty() && (p.style.sys_volume > 0.0 || p.style.mic_volume > 0.0);
+    let mut enc = Encoder::new(&gpu, out, &EncoderConfig { width: w, height: h, fps, bitrate, audio })?;
+    let rate = crate::audio::MIX_RATE as u64;
     let (t0, t1) = (p.trim_start, p.trim_end.min(p.rec.duration));
     let frames = ((t1 - t0) * fps as f64).floor().max(1.0) as u64;
     let period = 10_000_000 / fps as i64;
@@ -88,6 +91,12 @@ pub fn run(p: &Project, out: &std::path::Path, progress: &AtomicU32, cancel: &At
         let tex = enc.next_texture();
         unsafe { gpu.ctx.CopyResource(&tex, &comp.out) };
         enc.submit(&tex, i as i64 * period, period)?;
+        if audio {
+            // Audio for exactly this frame's time span keeps both streams interleaved.
+            let (n0, n1) = (i * rate / fps as u64, (i + 1) * rate / fps as u64);
+            let pcm = tracks.render_pcm16(t0, n0, n1, p.style.sys_volume, p.style.mic_volume);
+            enc.submit_audio(&pcm, (n0 * 10_000_000 / rate) as i64)?;
+        }
         progress.store(((i + 1) * 10000 / frames) as u32, Ordering::Relaxed);
     }
     enc.finish().ctx("finish export")

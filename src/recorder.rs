@@ -112,7 +112,7 @@ fn record_thread(
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     }
 
-    let mut origin = opts.target.origin();
+    let mut origin = cap.page_origin().unwrap_or_else(|| opts.target.origin());
     let follow = matches!(opts.target, Target::Window(_));
     let mut dpi = (96u32, 96u32);
     unsafe {
@@ -172,7 +172,9 @@ fn record_thread(
         }
         let (cx, cy, kind) = sampler.sample();
         let t = (idx * period) as f64 / 1e7;
-        if follow {
+        if let Some(o) = cap.page_origin() {
+            origin = o;
+        } else if follow {
             origin = opts.target.origin();
         }
         origins.push((t, origin.0, origin.1));

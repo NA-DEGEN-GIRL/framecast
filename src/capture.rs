@@ -15,6 +15,7 @@ use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemIntero
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, Interface};
 
+use crate::browser::{PageFinder, PageGeom, PageTracker};
 use crate::gpu::Gpu;
 use crate::util::{Ctx, Res};
 
@@ -124,6 +125,11 @@ pub fn windows() -> Vec<WindowInfo> {
     list
 }
 
+/// Where a browser's page is now (the whole window if it can't be found).
+fn page_or_window(w: &WindowInfo) -> RECT {
+    PageFinder::new(w.hwnd).rect().or_else(|| window_bounds(w.hwnd)).unwrap_or(w.rect)
+}
+
 /// What to record.
 #[derive(Clone, Debug)]
 pub enum Target {
@@ -132,13 +138,16 @@ pub enum Target {
     Window(WindowInfo),
     /// A rectangle of a display, relative to the display's top-left.
     Area(Monitor, RECT),
+    /// Just the web page of a browser window (no tabs, address bar or frame);
+    /// captured like `Window`, then cropped to the page as it moves.
+    Browser(WindowInfo),
 }
 
 impl Target {
     pub fn monitor_handle(&self) -> isize {
         match self {
             Target::Display(m) | Target::Area(m, _) => m.handle,
-            Target::Window(w) => unsafe { MonitorFromWindow(HWND(w.hwnd as _), MONITOR_DEFAULTTONEAREST).0 as isize },
+            Target::Window(w) | Target::Browser(w) => unsafe { MonitorFromWindow(HWND(w.hwnd as _), MONITOR_DEFAULTTONEAREST).0 as isize },
         }
     }
 
@@ -148,16 +157,23 @@ impl Target {
             Target::Display(m) => (m.rect.left, m.rect.top),
             Target::Area(m, r) => (m.rect.left + r.left, m.rect.top + r.top),
             Target::Window(w) => window_bounds(w.hwnd).map_or((w.rect.left, w.rect.top), |r| (r.left, r.top)),
+            Target::Browser(w) => {
+                let r = page_or_window(w);
+                (r.left, r.top)
+            }
         }
     }
 
     /// Screen rectangle of what is recorded (for placing the countdown).
     pub fn screen_rect(&self) -> RECT {
-        let (x, y) = self.origin();
         match self {
             Target::Display(m) => m.rect,
-            Target::Area(_, r) => RECT { left: x, top: y, right: x + r.right - r.left, bottom: y + r.bottom - r.top },
+            Target::Area(_, r) => {
+                let (x, y) = self.origin();
+                RECT { left: x, top: y, right: x + r.right - r.left, bottom: y + r.bottom - r.top }
+            }
             Target::Window(w) => window_bounds(w.hwnd).unwrap_or(w.rect),
+            Target::Browser(w) => page_or_window(w),
         }
     }
 
@@ -165,7 +181,7 @@ impl Target {
         match self {
             Target::Display(m) => format!("Display {}×{}", m.width(), m.height()),
             Target::Area(_, r) => format!("Area {}×{}", r.right - r.left, r.bottom - r.top),
-            Target::Window(w) => w.title.clone(),
+            Target::Window(w) | Target::Browser(w) => w.title.clone(),
         }
     }
 }
@@ -179,6 +195,8 @@ pub struct Capturer {
     pub height: u32,
     /// Sub-rectangle of the source frame that becomes the video (area mode).
     crop: Option<RECT>,
+    /// Browser mode: live page position, the crop is derived from it per frame.
+    page: Option<PageTracker>,
     last_size: (u32, u32),
 }
 
@@ -188,7 +206,7 @@ impl Capturer {
             let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().ctx("capture interop")?;
             let item: GraphicsCaptureItem = match target {
                 Target::Display(m) | Target::Area(m, _) => interop.CreateForMonitor(HMONITOR(m.handle as _)).ctx("CreateForMonitor")?,
-                Target::Window(w) => interop.CreateForWindow(HWND(w.hwnd as _)).ctx("This window can't be captured")?,
+                Target::Window(w) | Target::Browser(w) => interop.CreateForWindow(HWND(w.hwnd as _)).ctx("This window can't be captured")?,
             };
             let dxgi: IDXGIDevice = gpu.device.cast().ctx("IDXGIDevice")?;
             let d3d: IDirect3DDevice = CreateDirect3D11DeviceFromDXGIDevice(&dxgi).ctx("WinRT device")?.cast().ctx("cast")?;
@@ -205,9 +223,14 @@ impl Capturer {
             let _ = session.SetIsBorderRequired(false);
             // Allow frame delivery faster than the default 60 Hz cap on newer builds.
             let _ = session.SetMinUpdateInterval(TimeSpan { Duration: 10_000 });
+            let page = match target {
+                Target::Browser(w) => Some(PageTracker::start(w.hwnd).ok_or("Couldn't find the web page in this window")?),
+                _ => None,
+            };
             session.StartCapture().ctx("StartCapture")?;
-            let crop = match target {
-                Target::Area(_, r) => Some(*r),
+            let crop = match (target, &page) {
+                (Target::Area(_, r), _) => Some(*r),
+                (_, Some(p)) => Some(page_crop(&p.get())),
                 _ => None,
             };
             let (width, height) = match crop {
@@ -215,7 +238,7 @@ impl Capturer {
                 None => (size.Width as u32, size.Height as u32),
             };
             let last_size = (size.Width as u32, size.Height as u32);
-            Ok(Capturer { _item: item, pool, session, d3d, width, height, crop, last_size })
+            Ok(Capturer { _item: item, pool, session, d3d, width, height, crop, page, last_size })
         }
     }
 
@@ -236,9 +259,13 @@ impl Capturer {
             let dd = crate::gpu::tex_desc(dst);
             let cs = frame.ContentSize().unwrap_or(SizeInt32 { Width: sd.Width as i32, Height: sd.Height as i32 });
             let (cw, ch) = (cs.Width.max(0) as u32, cs.Height.max(0) as u32);
-            let (x0, y0) = self.crop.map_or((0, 0), |r| (r.left.max(0) as u32, r.top.max(0) as u32));
-            let right = (x0 + dd.Width).min(cw).min(sd.Width);
-            let bottom = (y0 + dd.Height).min(ch).min(sd.Height);
+            if let Some(p) = &self.page {
+                self.crop = Some(page_crop(&p.get()));
+            }
+            let crop = self.crop.unwrap_or(RECT { left: 0, top: 0, right: cw as i32, bottom: ch as i32 });
+            let (x0, y0) = (crop.left.max(0) as u32, crop.top.max(0) as u32);
+            let right = (x0 + dd.Width).min(crop.right.max(0) as u32).min(cw).min(sd.Width);
+            let bottom = (y0 + dd.Height).min(crop.bottom.max(0) as u32).min(ch).min(sd.Height);
             if right > x0 && bottom > y0 {
                 if right - x0 < dd.Width || bottom - y0 < dd.Height {
                     // A shrunken window no longer fills the video: clear what it doesn't cover.
@@ -261,6 +288,23 @@ impl Capturer {
         let _ = frame.Close();
         ok
     }
+}
+
+impl Capturer {
+    /// Browser mode: screen position of the page's top-left right now.
+    pub fn page_origin(&self) -> Option<(i32, i32)> {
+        self.page.as_ref().map(|p| {
+            let g = p.get();
+            (g.page.left, g.page.top)
+        })
+    }
+}
+
+/// The page's rectangle inside a window-capture frame, which starts at the
+/// window's visible bounds (DWM extended frame bounds, no shadow).
+fn page_crop(g: &PageGeom) -> RECT {
+    let (ox, oy) = (g.window.left, g.window.top);
+    RECT { left: g.page.left - ox, top: g.page.top - oy, right: g.page.right - ox, bottom: g.page.bottom - oy }
 }
 
 impl Drop for Capturer {

@@ -10,6 +10,7 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::UI::Input::KeyboardAndMouse::{VK_ESCAPE, VK_SHIFT, GetKeyState};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::browser::PageFinder;
 use crate::capture::{self, Capturer, Monitor, Target, WindowInfo};
 use crate::d2d::{D2d, rgba};
 use crate::gpu::Gpu;
@@ -21,6 +22,8 @@ use crate::window::{self, CursorShape, Kind, Surface};
 #[derive(Clone, Copy, PartialEq)]
 pub enum Mode {
     Window,
+    /// Like `Window`, but only browsers, and only their web page is recorded.
+    Browser,
     Area,
 }
 
@@ -37,6 +40,8 @@ pub struct Selector {
     mode: Mode,
     /// Windows on this display, front-most first, in overlay (display-relative) pixels.
     windows: Vec<(WindowInfo, Rect)>,
+    /// Browser mode: each window's web page (same order), if it has one.
+    pages: Vec<Option<(RECT, Rect)>>,
     drag: Option<(f32, f32)>,
     ui: Ui,
     t0: std::time::Instant,
@@ -61,18 +66,21 @@ impl Selector {
         let snap = snapshot(gpu, d2d, monitor).ok();
         let r = monitor.rect;
         let (mw, mh) = (monitor.width() as f32, monitor.height() as f32);
-        let windows = if mode == Mode::Window {
-            capture::windows()
-                .into_iter()
-                .filter_map(|w| {
-                    let x0 = (w.rect.left - r.left) as f32;
-                    let y0 = (w.rect.top - r.top) as f32;
-                    let x1 = (w.rect.right - r.left) as f32;
-                    let y1 = (w.rect.bottom - r.top) as f32;
-                    let (cx0, cy0, cx1, cy1) = (x0.max(0.0), y0.max(0.0), x1.min(mw), y1.min(mh));
-                    (cx1 - cx0 > 40.0 && cy1 - cy0 > 40.0).then(|| (w, Rect::new(cx0, cy0, cx1 - cx0, cy1 - cy0)))
-                })
-                .collect()
+        // Screen rect -> overlay rect, clipped to this display.
+        let local = |s: &RECT| {
+            let x0 = ((s.left - r.left) as f32).max(0.0);
+            let y0 = ((s.top - r.top) as f32).max(0.0);
+            let x1 = ((s.right - r.left) as f32).min(mw);
+            let y1 = ((s.bottom - r.top) as f32).min(mh);
+            (x1 - x0 > 40.0 && y1 - y0 > 40.0).then(|| Rect::new(x0, y0, x1 - x0, y1 - y0))
+        };
+        let windows: Vec<(WindowInfo, Rect)> = if mode == Mode::Area {
+            Vec::new()
+        } else {
+            capture::windows().into_iter().filter_map(|w| local(&w.rect).map(|lr| (w, lr))).collect()
+        };
+        let pages = if mode == Mode::Browser {
+            windows.iter().map(|(w, _)| PageFinder::new(w.hwnd).rect().and_then(|p| local(&p).map(|lr| (p, lr)))).collect()
         } else {
             Vec::new()
         };
@@ -87,6 +95,7 @@ impl Selector {
             monitor: monitor.clone(),
             mode,
             windows,
+            pages,
             drag: None,
             ui: Ui::new(),
             t0: std::time::Instant::now(),
@@ -128,8 +137,8 @@ impl Selector {
         let (mx, my) = (self.ui.inp.mx, self.ui.inp.my);
         let mut outcome = Outcome::Pending;
 
-        // Interaction.
-        let selection: Option<(Rect, String)> = match self.mode {
+        // Interaction. The flag says whether clicking would pick it.
+        let selection: Option<(Rect, String, bool)> = match self.mode {
             Mode::Window => {
                 let hov = self.hovered_window(mx, my);
                 if self.ui.inp.released {
@@ -139,7 +148,22 @@ impl Selector {
                 }
                 hov.map(|i| {
                     let (w, r) = &self.windows[i];
-                    (*r, format!("{}   {}×{}", w.title, w.rect.right - w.rect.left, w.rect.bottom - w.rect.top))
+                    (*r, format!("{}   {}×{}", w.title, w.rect.right - w.rect.left, w.rect.bottom - w.rect.top), true)
+                })
+            }
+            Mode::Browser => {
+                let hov = self.hovered_window(mx, my);
+                if self.ui.inp.released {
+                    if let Some(i) = hov.filter(|&i| self.pages[i].is_some()) {
+                        outcome = Outcome::Done(Target::Browser(self.windows[i].0.clone()));
+                    }
+                }
+                hov.map(|i| {
+                    let (w, r) = &self.windows[i];
+                    match &self.pages[i] {
+                        Some((p, lr)) => (*lr, format!("{}   ·   page {}×{}", w.title, p.right - p.left, p.bottom - p.top), true),
+                        None => (*r, "Not a browser: no web page found in this window".to_string(), false),
+                    }
                 })
             }
             Mode::Area => {
@@ -156,7 +180,7 @@ impl Selector {
                     }
                     self.drag = None;
                 }
-                sel.map(|r| (r, format!("{} × {}", (r.w.round() as i32) & !1, (r.h.round() as i32) & !1)))
+                sel.map(|r| (r, format!("{} × {}", (r.w.round() as i32) & !1, (r.h.round() as i32) & !1), true))
             }
         };
 
@@ -171,16 +195,17 @@ impl Selector {
             }
         }
         ui.fill(d2d, full, 0.0, rgba(0x000000, 0.55));
-        if let Some((r, label)) = &selection {
-            if let Some(b) = &self.snapshot {
+        if let Some((r, label, ok)) = &selection {
+            let color = if *ok { ACCENT } else { FAINT };
+            if let Some(b) = self.snapshot.as_ref().filter(|_| *ok) {
                 unsafe { d2d.dc.DrawBitmap(b, Some(&r.d2()), 1.0, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, Some(&r.d2()), None) };
             }
-            ui.stroke(d2d, r.inset(-ui.px(2.0)), 0.0, rgba(ACCENT, 1.0), ui.px(3.0));
+            ui.stroke(d2d, r.inset(-ui.px(2.0)), 0.0, rgba(color, 1.0), ui.px(3.0));
             let tw = ui.measure(d2d, label, 13.0, DWRITE_FONT_WEIGHT_SEMI_BOLD).min(ui.px(520.0)) + ui.px(24.0);
             let th = ui.px(30.0);
             let ly = if r.y - th - ui.px(10.0) > 0.0 { r.y - th - ui.px(10.0) } else { r.y + ui.px(10.0) };
             let lr = Rect::new(r.x.max(ui.px(8.0)), ly, tw, th);
-            ui.fill(d2d, lr, ui.px(8.0), rgba(ACCENT, 1.0));
+            ui.fill(d2d, lr, ui.px(8.0), rgba(color, 1.0));
             ui.text(d2d, lr.inset_xy(ui.px(12.0), 0.0), label, 13.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, rgba(0xffffff, 1.0), Align::Left);
         } else if self.mode == Mode::Area && ui.inp.inside {
             ui.line(d2d, mx, 0.0, mx, full.h, rgba(0xffffff, 0.35), 1.0);
@@ -190,6 +215,7 @@ impl Selector {
         // Instructions.
         let hint = match self.mode {
             Mode::Window => "Click a window to record it   ·   Esc to cancel",
+            Mode::Browser => "Click a browser window: only the web page is recorded, no tabs or address bar   ·   Esc to cancel",
             Mode::Area => "Drag to select an area   ·   Hold Shift for 16:9   ·   Esc to cancel",
         };
         let hw = ui.measure(d2d, hint, 14.0, DWRITE_FONT_WEIGHT_SEMI_BOLD) + ui.px(40.0);
@@ -197,11 +223,17 @@ impl Selector {
         ui.fill(d2d, hr, ui.px(22.0), rgba(0x15171D, 0.94));
         ui.stroke(d2d, hr, ui.px(22.0), rgba(0xffffff, 0.12), 1.0);
         ui.text(d2d, hr, hint, 14.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, rgba(TEXT, 1.0), Align::Center);
-        if self.mode == Mode::Window && self.windows.is_empty() {
+        let empty = match self.mode {
+            Mode::Window => self.windows.is_empty().then_some("No windows on this display"),
+            Mode::Browser => self.pages.iter().all(Option::is_none).then_some("No browser windows on this display"),
+            Mode::Area => None,
+        };
+        if let Some(msg) = empty {
             let r = Rect::new(full.cx() - ui.px(200.0), full.cy() - ui.px(20.0), ui.px(400.0), ui.px(40.0));
-            ui.text(d2d, r, "No windows on this display", 16.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, rgba(TEXT, 1.0), Align::Center);
+            ui.text(d2d, r, msg, 16.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, rgba(TEXT, 1.0), Align::Center);
         }
-        ui.cursor = if self.mode == Mode::Window && selection.is_some() { CursorShape::Hand } else { CursorShape::Cross };
+        let pickable = selection.as_ref().is_some_and(|s| s.2);
+        ui.cursor = if self.mode != Mode::Area && pickable { CursorShape::Hand } else { CursorShape::Cross };
         ui.end_frame();
         window::set_cursor(self.surface.hwnd, ui.cursor);
         self.surface.end(d2d)?;

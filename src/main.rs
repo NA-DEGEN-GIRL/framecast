@@ -4,6 +4,7 @@
 
 mod app;
 mod audio;
+mod browser;
 mod capture;
 mod clock;
 mod d2d;
@@ -64,13 +65,15 @@ fn main() {
         println!("{:?} in {:.2}s -> {}", r, t.elapsed().as_secs_f64(), out.display());
         return;
     }
-    // --record <secs>  |  --record-window <title contains> <secs>   (scripted demos / tests)
-    if matches!(args.get(1).map(String::as_str), Some("--record") | Some("--record-window")) {
-        let window = args[1] == "--record-window";
+    // --record <secs>  |  --record-window / --record-browser <title contains> <secs>   (scripted demos / tests)
+    if matches!(args.get(1).map(String::as_str), Some("--record") | Some("--record-window") | Some("--record-browser")) {
+        let browser = args[1] == "--record-browser";
+        let window = args[1] != "--record";
         let secs: f64 = args.get(if window { 3 } else { 2 }).and_then(|s| s.parse().ok()).unwrap_or(3.0);
         let target = if window {
             let needle = args.get(2).cloned().unwrap_or_default().to_lowercase();
             match capture::windows().into_iter().find(|w| w.title.to_lowercase().contains(&needle)) {
+                Some(w) if browser => capture::Target::Browser(w),
                 Some(w) => capture::Target::Window(w),
                 None => {
                     log!("no window title contains '{needle}'");

@@ -236,7 +236,7 @@ impl App {
                 if self.mode_sel == 0 {
                     self.target_chosen(opts)?;
                 } else {
-                    let mode = if self.mode_sel == 1 { selector::Mode::Window } else { selector::Mode::Area };
+                    let mode = [selector::Mode::Window, selector::Mode::Browser, selector::Mode::Area][(self.mode_sel - 1).min(2)];
                     match Selector::new(&self.gpu, &self.d2d, &mon, mode) {
                         Ok(sel) => self.screen = Screen::Selecting { sel: Box::new(sel), opts },
                         Err(e) => {
@@ -497,7 +497,7 @@ impl App {
         let (r, c) = c.cut_top(ui.px(20.0));
         ui.section(d2d, r, "Record");
         let (r, c) = c.cut_top(ui.px(38.0));
-        ui.segmented(d2d, id("mode"), r, &["Full screen", "Window", "Area"], &mut self.mode_sel);
+        ui.segmented(d2d, id("mode"), r, &["Full screen", "Window", "Browser page", "Area"], &mut self.mode_sel);
         let (_, c) = c.cut_top(ui.px(16.0));
         let (r, c) = c.cut_top(ui.px(20.0));
         ui.section(d2d, r, "Display");
@@ -534,7 +534,7 @@ impl App {
         }
         let (_, c) = c.cut_top(ui.px(16.0));
         let (r, c) = c.cut_top(ui.px(52.0));
-        let label = ["●   Start recording", "●   Choose window…", "●   Select area…"][self.mode_sel.min(2)];
+        let label = ["●   Start recording", "●   Choose window…", "●   Choose browser…", "●   Select area…"][self.mode_sel.min(3)];
         if ui.button(d2d, id("record"), r, label, ButtonKind::Danger) {
             action = Some(Action::StartRecording);
         }

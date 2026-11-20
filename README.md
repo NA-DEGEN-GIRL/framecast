@@ -29,7 +29,7 @@ Because the effects are applied after recording, you can change all of them late
 
 | | |
 |---|---|
-| **Record** | Full screen, a single **window** (even when covered by other windows), or a dragged **area** · 30/60 fps · 3-second countdown · system audio and microphone |
+| **Record** | Full screen, a single **window** (even when covered by other windows), just the **web page** of a browser window (no tabs, address bar or bookmarks bar; follows resizes), or a dragged **area** · 30/60 fps · 3-second countdown · system audio and microphone |
 | **Controls** | Floating bar that never appears in the video · **Pause / resume** (`Ctrl+Shift+F10`) · Stop (`Ctrl+Shift+F9`) |
 | **Auto zoom** | Zoom segments generated from your clicks; the camera follows the cursor with a spring + dead zone |
 | **Cursor** | Vector cursor redrawn at any size (sharp at any zoom), motion smoothing, hide when idle, press animation |
@@ -92,6 +92,7 @@ Nothing ever leaves your machine: no network access, no telemetry.
 | File | Purpose |
 |---|---|
 | `src/capture.rs` | Windows.Graphics.Capture: display / window / cropped area, window list |
+| `src/browser.rs` | Finds and tracks a browser's page viewport (Chromium render widget, UI Automation fallback) |
 | `src/selector.rs` | Full-screen picker for windows and areas |
 | `src/media.rs` | Media Foundation hardware encoder / decoder (GPU textures in and out) |
 | `src/audio.rs` | WASAPI loopback + mic capture, mixing, preview playback |
@@ -108,7 +109,7 @@ Nothing ever leaves your machine: no network access, no telemetry.
 
 ### Developer flags
 
-`--record <secs>` · `--record-window <title> <secs>` · `--export <project dir>` · `--open <project dir>` · `--make-icon <out.ico>`
+`--record <secs>` · `--record-window <title> <secs>` · `--record-browser <title> <secs>` · `--export <project dir>` · `--open <project dir>` · `--make-icon <out.ico>`
 · env `FRAMECAST_SHOW_CONTROLS_IN_CAPTURE=1` (lets screenshots include the recording bar) · log at `Videos\Framecast\framecast.log`
 
 ## Roadmap

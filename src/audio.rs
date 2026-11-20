@@ -356,17 +356,6 @@ impl Tracks {
         (soft_clip(l), soft_clip(r))
     }
 
-    /// 16-bit stereo PCM at MIX_RATE covering sample frames [n0, n1) after `t0`.
-    pub fn render_pcm16(&self, t0: f64, n0: u64, n1: u64, sys_vol: f32, mic_vol: f32) -> Vec<i16> {
-        let mut out = Vec::with_capacity(((n1 - n0) * 2) as usize);
-        for n in n0..n1 {
-            let t = t0 + n as f64 / MIX_RATE as f64;
-            let (l, r) = self.mix(t, sys_vol, mic_vol);
-            out.push((l * 32767.0) as i16);
-            out.push((r * 32767.0) as i16);
-        }
-        out
-    }
 }
 
 #[inline]
@@ -382,8 +371,9 @@ pub struct Player {
 
 pub struct PlayParams {
     pub tracks: Tracks,
+    pub timeline: crate::project::Timeline,
+    /// Output (edited) time to start from.
     pub start: f64,
-    pub end: f64,
     pub volumes: Arc<Mutex<(f32, f32)>>,
 }
 
@@ -432,8 +422,15 @@ fn play_thread(p: PlayParams, stop: &AtomicBool) -> Res<()> {
             let (sv, mv) = *p.volumes.lock().unwrap();
             let base = written.load(Ordering::Relaxed);
             for f in 0..frames as usize {
-                let t = p.start + (base + f as u64) as f64 / fmt.rate as f64;
-                let (l, r) = if t < p.end { p.tracks.mix(t, sv, mv) } else { (0.0, 0.0) };
+                let o = p.start + (base + f as u64) as f64 / fmt.rate as f64;
+                let (l, r) = if o < p.timeline.duration {
+                    let (t, edge) = p.timeline.to_rec_edge(o);
+                    let g = (edge / 0.006).min(1.0) as f32;
+                    let (l, r) = p.tracks.mix(t, sv, mv);
+                    (l * g, r * g)
+                } else {
+                    (0.0, 0.0)
+                };
                 for c in 0..fmt.channels {
                     *buf.add(f * fmt.channels + c) = if c % 2 == 0 { l } else { r };
                 }

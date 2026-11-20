@@ -222,6 +222,8 @@ pub struct Project {
     pub zooms: Vec<ZoomSeg>,
     pub trim_start: f64,
     pub trim_end: f64,
+    /// Removed sections (recording seconds), sorted and non-overlapping.
+    pub cuts: Vec<(f64, f64)>,
 }
 
 impl Project {
@@ -231,6 +233,7 @@ impl Project {
             dir: dir.to_path_buf(),
             trim_start: 0.0,
             trim_end: rec.duration,
+            cuts: Vec::new(),
             zooms: Vec::new(),
             style: Style::default(),
             rec,
@@ -275,6 +278,15 @@ impl Project {
             .map(|z| ZoomSeg { start: z.f64_or("start", 0.0), end: z.f64_or("end", 0.0), scale: z.f32_or("scale", 2.0).clamp(1.1, 5.0) })
             .filter(|z| z.end > z.start)
             .collect();
+        self.cuts = j
+            .arr("cuts")
+            .iter()
+            .filter_map(|c| match c {
+                Json::Arr(a) if a.len() == 2 => Some((a[0].as_f64()?, a[1].as_f64()?)),
+                _ => None,
+            })
+            .collect();
+        self.normalize_cuts();
         self.trim_start = j.f64_or("trim_start", 0.0).clamp(0.0, self.rec.duration);
         self.trim_end = j.f64_or("trim_end", self.rec.duration).clamp(self.trim_start, self.rec.duration);
         if self.trim_end - self.trim_start < 0.1 {
@@ -319,6 +331,7 @@ impl Project {
         j.set("version", 1)
             .set("style", st)
             .set("zooms", zooms)
+            .set("cuts", self.cuts.iter().map(|c| Json::Arr(vec![Json::Num(c.0), Json::Num(c.1)])).collect::<Vec<_>>())
             .set("trim_start", self.trim_start)
             .set("trim_end", self.trim_end);
         std::fs::write(self.dir.join("project.json"), j.to_string()).ctx("write project.json")
@@ -347,6 +360,21 @@ impl Project {
         (even(w as f32 * k), even(h as f32 * k))
     }
 
+    /// Sorts, clamps and merges cut ranges; drops slivers.
+    pub fn normalize_cuts(&mut self) {
+        let d = self.rec.duration;
+        let mut v: Vec<(f64, f64)> = self.cuts.iter().map(|&(a, b)| (a.min(b).clamp(0.0, d), a.max(b).clamp(0.0, d))).filter(|c| c.1 - c.0 >= 0.05).collect();
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut out: Vec<(f64, f64)> = Vec::with_capacity(v.len());
+        for c in v {
+            match out.last_mut() {
+                Some(l) if c.0 <= l.1 => l.1 = l.1.max(c.1),
+                _ => out.push(c),
+            }
+        }
+        self.cuts = out;
+    }
+
     /// Full path of the background image when the style uses one.
     pub fn background_image(&self) -> Option<std::path::PathBuf> {
         let s = &self.style;
@@ -357,6 +385,87 @@ impl Project {
 
     pub fn is_gif(&self) -> bool {
         self.style.format == 1
+    }
+}
+
+/// The edited video's timeline: which recording ranges are kept (after trim and
+/// cuts), and conversions between output time and recording time.
+#[derive(Clone, Debug)]
+pub struct Timeline {
+    pub kept: Vec<(f64, f64)>,
+    /// Output time at which each kept range starts.
+    starts: Vec<f64>,
+    pub duration: f64,
+}
+
+impl Timeline {
+    pub fn new(p: &Project) -> Timeline {
+        let mut kept = Vec::new();
+        let mut s = p.trim_start;
+        for &(a, b) in &p.cuts {
+            let (a, b) = (a.max(p.trim_start), b.min(p.trim_end));
+            if b <= a {
+                continue;
+            }
+            if a > s {
+                kept.push((s, a));
+            }
+            s = s.max(b);
+        }
+        if p.trim_end > s {
+            kept.push((s, p.trim_end));
+        }
+        if kept.is_empty() {
+            kept.push((p.trim_start, p.trim_start + 0.1));
+        }
+        let mut starts = Vec::with_capacity(kept.len());
+        let mut acc = 0.0;
+        for k in &kept {
+            starts.push(acc);
+            acc += k.1 - k.0;
+        }
+        Timeline { kept, starts, duration: acc }
+    }
+
+    fn seg(&self, o: f64) -> usize {
+        self.starts.partition_point(|&s| s <= o).saturating_sub(1)
+    }
+
+    /// Recording time shown at output time `o`.
+    pub fn to_rec(&self, o: f64) -> f64 {
+        self.to_rec_edge(o).0
+    }
+
+    /// Recording time at output time `o`, plus the distance (output seconds) to the
+    /// nearest join between two kept ranges (used to de-click audio at cuts).
+    pub fn to_rec_edge(&self, o: f64) -> (f64, f64) {
+        let o = o.clamp(0.0, self.duration);
+        let i = self.seg(o);
+        let (a, b) = self.kept[i];
+        let into = o - self.starts[i];
+        let t = (a + into).min(b);
+        let mut edge = f64::MAX;
+        if i > 0 {
+            edge = edge.min(into);
+        }
+        if i + 1 < self.kept.len() {
+            edge = edge.min(b - t);
+        }
+        (t, edge)
+    }
+
+    /// Output time for recording time `t` (a time inside a cut maps to where the
+    /// video resumes after it).
+    pub fn to_out(&self, t: f64) -> f64 {
+        for (i, &(a, b)) in self.kept.iter().enumerate() {
+            if t < a {
+                return self.starts[i];
+            }
+            if t <= b {
+                return self.starts[i] + (t - a);
+            }
+        }
+        self.duration
     }
 }
 
@@ -560,4 +669,43 @@ pub fn recent_projects() -> Vec<(std::path::PathBuf, String, f64, String)> {
     }
     out.sort_by(|a, b| b.1.cmp(&a.1));
     out
+}
+
+#[cfg(test)]
+mod timeline_tests {
+    use super::*;
+
+    fn project(cuts: Vec<(f64, f64)>, trim: (f64, f64)) -> Project {
+        let rec = Recording {
+            source: String::new(),
+            cuts: Vec::new(),
+            width: 100,
+            height: 100,
+            fps: 60,
+            duration: 10.0,
+            dpi_scale: 1.0,
+            cursor: Vec::new(),
+            clicks: Vec::new(),
+            keys: Vec::new(),
+        };
+        let mut p = Project { dir: "x".into(), rec, style: Style::default(), zooms: Vec::new(), trim_start: trim.0, trim_end: trim.1, cuts };
+        p.normalize_cuts();
+        p
+    }
+
+    #[test]
+    fn maps_around_cuts() {
+        let p = project(vec![(6.0, 7.0), (2.0, 4.0), (3.5, 4.5)], (1.0, 9.0));
+        assert_eq!(p.cuts, vec![(2.0, 4.5), (6.0, 7.0)]);
+        let tl = Timeline::new(&p);
+        assert_eq!(tl.kept, vec![(1.0, 2.0), (4.5, 6.0), (7.0, 9.0)]);
+        assert!((tl.duration - 4.5).abs() < 1e-9);
+        assert!((tl.to_rec(0.5) - 1.5).abs() < 1e-9);
+        assert!((tl.to_rec(1.25) - 4.75).abs() < 1e-9);
+        assert!((tl.to_rec(3.0) - 7.5).abs() < 1e-9);
+        assert!((tl.to_out(3.0) - 1.0).abs() < 1e-9); // inside a cut -> resume point
+        assert!((tl.to_out(5.0) - 1.5).abs() < 1e-9);
+        let (_, edge) = tl.to_rec_edge(1.01);
+        assert!(edge < 0.02);
+    }
 }

@@ -18,7 +18,7 @@ use crate::gpu::Gpu;
 use crate::input::{PAUSE_HOTKEY_LABEL, STOP_HOTKEY_LABEL};
 use crate::log;
 use crate::media::Decoder;
-use crate::project::{self, ASPECTS, BACKGROUNDS, CLICK_EFFECTS, FORMATS, GIF_FPS, GIF_SIZES, Motion, Project, RESOLUTIONS, Style, ZoomSeg};
+use crate::project::{self, Timeline, ASPECTS, BACKGROUNDS, CLICK_EFFECTS, FORMATS, GIF_FPS, GIF_SIZES, Motion, Project, RESOLUTIONS, Style, ZoomSeg};
 use crate::recorder::{self, ActiveRecording, RecordOptions};
 use crate::render::Compositor;
 use crate::selector::{self, Outcome, Selector};
@@ -616,6 +616,7 @@ struct Snap {
     style: Style,
     zooms: Vec<ZoomSeg>,
     trim: (f64, f64),
+    cuts: Vec<(f64, f64)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -627,6 +628,9 @@ enum Drag {
     ZoomEnd(usize),
     TrimStart,
     TrimEnd,
+    CutStart(usize),
+    CutEnd(usize),
+    CutMove { i: usize, grab: f64, len: f64 },
 }
 
 struct Editor {
@@ -641,6 +645,10 @@ struct Editor {
     last_tick: Instant,
     rendered: Option<(f64, Snap)>,
     sel: Option<usize>,
+    /// Selected cut (mutually exclusive with a selected zoom).
+    sel_cut: Option<usize>,
+    /// Playback position on the edited (output) timeline.
+    play_out: f64,
     drag: Drag,
     undo: Vec<Snap>,
     redo: Vec<Snap>,
@@ -668,7 +676,7 @@ impl Editor {
         let (w, h) = p.canvas_size();
         let comp = Compositor::new(gpu, d2d, w, h)?;
         let motion = Motion::build(&p);
-        let snap = Snap { style: p.style.clone(), zooms: p.zooms.clone(), trim: (p.trim_start, p.trim_end) };
+        let snap = Snap { style: p.style.clone(), zooms: p.zooms.clone(), trim: (p.trim_start, p.trim_end), cuts: p.cuts.clone() };
         let mut title = pretty_name(&dir.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
         if !p.rec.source.is_empty() {
             title = format!("{title}   ·   {}", p.rec.source);
@@ -695,6 +703,8 @@ impl Editor {
             last_tick: Instant::now(),
             rendered: None,
             sel: None,
+            sel_cut: None,
+            play_out: 0.0,
             drag: Drag::None,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -708,15 +718,19 @@ impl Editor {
     }
 
     fn snap(&self) -> Snap {
-        Snap { style: self.p.style.clone(), zooms: self.p.zooms.clone(), trim: (self.p.trim_start, self.p.trim_end) }
+        Snap { style: self.p.style.clone(), zooms: self.p.zooms.clone(), trim: (self.p.trim_start, self.p.trim_end), cuts: self.p.cuts.clone() }
     }
 
     fn restore(&mut self, s: Snap) {
         self.p.style = s.style;
         self.p.zooms = s.zooms;
         (self.p.trim_start, self.p.trim_end) = s.trim;
+        self.p.cuts = s.cuts;
         if self.sel.is_some_and(|i| i >= self.p.zooms.len()) {
             self.sel = None;
+        }
+        if self.sel_cut.is_some_and(|i| i >= self.p.cuts.len()) {
+            self.sel_cut = None;
         }
     }
 
@@ -741,11 +755,19 @@ impl Editor {
             self.toggle_play();
         }
         if ui.key(VK_DELETE.0) || ui.key(VK_BACK.0) {
-            if let Some(i) = self.sel.take() {
+            if let Some(i) = self.sel_cut.take() {
+                let before = self.snap();
+                self.p.cuts.remove(i);
+                self.push_undo(before);
+            } else if let Some(i) = self.sel.take() {
                 let before = self.snap();
                 self.p.zooms.remove(i);
                 self.push_undo(before);
             }
+        }
+        if ui.key(b'C' as u16) {
+            let t = self.t;
+            self.add_cut(t);
         }
         let step = 1.0 / self.p.rec.fps.max(1) as f64;
         if ui.key(VK_LEFT.0) {
@@ -772,11 +794,13 @@ impl Editor {
         }
 
         if self.playing {
-            self.t += dt;
-            if self.t >= self.p.trim_end {
-                self.t = self.p.trim_end;
+            let tl = Timeline::new(&self.p);
+            self.play_out += dt;
+            if self.play_out >= tl.duration {
+                self.play_out = tl.duration;
                 self.playing = false;
             }
+            self.t = tl.to_rec(self.play_out);
         }
 
         // Preview audio follows the play state.
@@ -784,8 +808,8 @@ impl Editor {
         if self.playing && self.player.is_none() && !self.tracks.is_empty() {
             self.player = Some(crate::audio::Player::start(crate::audio::PlayParams {
                 tracks: self.tracks.clone(),
-                start: self.t,
-                end: self.p.trim_end,
+                timeline: Timeline::new(&self.p),
+                start: self.play_out,
                 volumes: self.volumes.clone(),
             }));
         } else if !self.playing {
@@ -877,10 +901,31 @@ impl Editor {
 
     fn toggle_play(&mut self) {
         self.playing = !self.playing;
-        if self.playing && self.t >= self.p.trim_end - 0.01 {
-            self.t = self.p.trim_start;
+        if self.playing {
+            // Play the edited result: skip cuts, start over at the end.
+            let tl = Timeline::new(&self.p);
+            self.play_out = tl.to_out(self.t);
+            if self.play_out >= tl.duration - 0.01 {
+                self.play_out = 0.0;
+            }
+            self.t = tl.to_rec(self.play_out);
         }
         self.last_tick = Instant::now();
+    }
+
+    /// Removes one second around `t` (merged with neighbouring cuts).
+    fn add_cut(&mut self, t: f64) {
+        let (a, b) = ((t - 0.5).max(self.p.trim_start), (t + 0.5).min(self.p.trim_end));
+        if b - a < 0.1 {
+            return;
+        }
+        let before = self.snap();
+        self.p.cuts.push((a, b));
+        self.p.normalize_cuts();
+        self.push_undo(before);
+        self.sel_cut = self.p.cuts.iter().position(|c| c.0 <= t && t <= c.1);
+        self.sel = None;
+        self.playing = false;
     }
 
     fn draw(&mut self, ui: &mut Ui, d2d: &D2d, full: Rect) -> Option<Action> {
@@ -1262,13 +1307,18 @@ impl Editor {
         }
         let tr = Rect::new(pb.r() + ui.px(14.0), transport.y, ui.px(220.0), transport.h);
         ui.text(d2d, tr, &format!("{}  /  {}", fmt_time(self.t), fmt_time(dur)), 14.0, W_SEMI, rgba(TEXT, 1.0), Align::Left);
-        let hint = Rect::new(tr.r(), transport.y, transport.r() - tr.r(), transport.h);
+        let cut_btn = Rect::new(tr.r(), transport.cy() - ui.px(16.0), ui.px(120.0), ui.px(32.0));
+        if ui.button(d2d, id("cut"), cut_btn, "✂  Cut here", ButtonKind::Secondary) {
+            let t = self.t;
+            self.add_cut(t);
+        }
+        let hint = Rect::new(cut_btn.r(), transport.y, transport.r() - cut_btn.r(), transport.h);
         ui.text(
             d2d,
             hint,
             &format!(
-                "Clip {}   ·   Space play/pause   ·   Double-click zoom track to add   ·   Del removes   ·   Ctrl+Z undo",
-                fmt_time(self.p.trim_end - self.p.trim_start)
+                "Video {}   ·   Space play   ·   C or double-click recording = cut   ·   Double-click zoom track = zoom   ·   Del removes   ·   Ctrl+Z undo",
+                fmt_time(Timeline::new(&self.p).duration)
             ),
             11.5,
             W_NORMAL,
@@ -1301,6 +1351,7 @@ impl Editor {
 
         // Clip track (trim).
         let handle_w = ui.px(10.0);
+        let edge_w = ui.px(8.0);
         let (a, b) = (x_of(self.p.trim_start), x_of(self.p.trim_end));
         ui.fill(d2d, clip, ui.px(8.0), rgba(0x12141A, 1.0));
         let body = Rect::new(a, clip.y, b - a, clip.h);
@@ -1333,6 +1384,60 @@ impl Editor {
                 self.playing = false;
             }
             ui.fill(d2d, Rect::new(hr.cx() - ui.px(2.0), hr.y + ui.px(12.0), ui.px(4.0), hr.h - ui.px(24.0)), ui.px(2.0), rgba(0xffffff, if hov || held { 1.0 } else { 0.7 }));
+        }
+
+        // Cuts: removed sections drawn over the recording, edited like zoom blocks.
+        let mut over_cut = false;
+        for i in 0..self.p.cuts.len() {
+            let (ca, cb) = self.p.cuts[i];
+            let r = Rect::new(x_of(ca), clip.y + ui.px(3.0), (x_of(cb) - x_of(ca)).max(ui.px(6.0)), clip.h - ui.px(6.0));
+            let sel = self.sel_cut == Some(i);
+            let left = Rect::new(r.x - edge_w * 0.5, r.y, edge_w, r.h);
+            let right = Rect::new(r.r() - edge_w * 0.5, r.y, edge_w, r.h);
+            let (hl, held_l, _) = ui.behave(idx("cl", i), left);
+            let (hr, held_r, _) = ui.behave(idx("cr", i), right);
+            let (hb, held_b, clicked) = ui.behave(idx("cb", i), r);
+            over_cut |= hl || hr || hb;
+            if hl || hr || held_l || held_r {
+                ui.cursor = CursorShape::SizeWE;
+            } else if hb {
+                ui.cursor = CursorShape::Hand;
+            }
+            if self.drag == Drag::None && (held_l || held_r || held_b) {
+                self.sel_cut = Some(i);
+                self.sel = None;
+                self.playing = false;
+                if held_l {
+                    self.drag = Drag::CutStart(i);
+                    ui.edit_started = true;
+                } else if held_r {
+                    self.drag = Drag::CutEnd(i);
+                    ui.edit_started = true;
+                } else if ui.drag_delta().0.abs() > ui.px(3.0) {
+                    self.drag = Drag::CutMove { i, grab: t_of(ui.inp.mx - ui.drag_delta().0) - ca, len: cb - ca };
+                    ui.edit_started = true;
+                }
+            }
+            if clicked {
+                self.sel_cut = Some(i);
+                self.sel = None;
+            }
+            ui.fill(d2d, r, ui.px(6.0), rgba(0x0B0C10, 0.88));
+            ui.push_clip(d2d, r);
+            let mut sx = r.x - r.h;
+            while sx < r.r() {
+                ui.line(d2d, sx, r.b(), sx + r.h, r.y, rgba(RED, 0.28), ui.px(2.0));
+                sx += ui.px(9.0);
+            }
+            ui.pop_clip(d2d);
+            ui.stroke(d2d, r, ui.px(6.0), rgba(if sel { 0xffffff } else { RED }, if sel { 0.95 } else { 0.8 }), ui.px(if sel { 2.0 } else { 1.5 }));
+            if r.w > ui.px(70.0) {
+                ui.text(d2d, r.inset_xy(ui.px(10.0), 0.0), &format!("✂ Cut {:.1}s", cb - ca), 12.0, W_SEMI, rgba(0xffffff, 0.95), Align::Center);
+            }
+        }
+        if ui.inp.double && clip.contains(ui.inp.mx, ui.inp.my) && !over_cut {
+            let t = t_of(ui.inp.mx);
+            self.add_cut(t);
         }
 
         // Zoom track.
@@ -1372,8 +1477,9 @@ impl Editor {
                     ui.edit_started = true;
                 }
             }
-            if clicked {
+            if clicked || held_l || held_r || held_b {
                 self.sel = Some(i);
+                self.sel_cut = None;
             }
             let c = if sel { ACCENT_HI } else { ACCENT };
             ui.fill(d2d, r, ui.px(7.0), rgba(c, if sel { 1.0 } else if hb { 0.85 } else { 0.7 }));
@@ -1419,6 +1525,7 @@ impl Editor {
         let over_zoom = self.p.zooms.iter().any(|z| (z.start..=z.end).contains(&t_of(ui.inp.mx)));
         if zclick && !hovered_any && !over_zoom {
             self.sel = None;
+            self.sel_cut = None;
         }
         let _ = zheld;
 
@@ -1435,6 +1542,22 @@ impl Editor {
                 Drag::TrimEnd => {
                     self.p.trim_end = mt.max(self.p.trim_start + 0.5).min(dur);
                     self.t = self.p.trim_end;
+                }
+                Drag::CutStart(i) if i < self.p.cuts.len() => {
+                    let lo = if i > 0 { self.p.cuts[i - 1].1 } else { 0.0 };
+                    self.p.cuts[i].0 = mt.clamp(lo, self.p.cuts[i].1 - 0.1);
+                    self.t = self.p.cuts[i].0;
+                }
+                Drag::CutEnd(i) if i < self.p.cuts.len() => {
+                    let hi = self.p.cuts.get(i + 1).map_or(dur, |c| c.0);
+                    self.p.cuts[i].1 = mt.clamp(self.p.cuts[i].0 + 0.1, hi);
+                    self.t = self.p.cuts[i].1;
+                }
+                Drag::CutMove { i, grab, len } if i < self.p.cuts.len() => {
+                    let lo = if i > 0 { self.p.cuts[i - 1].1 } else { 0.0 };
+                    let hi = self.p.cuts.get(i + 1).map_or(dur, |c| c.0);
+                    let s = (mt - grab).clamp(lo, (hi - len).max(lo));
+                    self.p.cuts[i] = (s, (s + len).min(hi));
                 }
                 Drag::ZoomStart(i) if i < self.p.zooms.len() => {
                     let lo = if i > 0 { self.p.zooms[i - 1].end } else { 0.0 };

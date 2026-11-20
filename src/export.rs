@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::d2d::D2d;
 use crate::gpu::Gpu;
 use crate::media::{Decoder, Encoder, EncoderConfig};
-use crate::project::{Motion, Project};
+use crate::project::{Motion, Project, Timeline};
 use crate::render::Compositor;
 use crate::util::{Ctx, Res, secs_to_hns};
 
@@ -78,15 +78,15 @@ pub fn run(p: &Project, out: &std::path::Path, progress: &AtomicU32, cancel: &At
     let audio = !tracks.is_empty() && (p.style.sys_volume > 0.0 || p.style.mic_volume > 0.0);
     let mut enc = Encoder::new(&gpu, out, &EncoderConfig { width: w, height: h, fps, bitrate, audio })?;
     let rate = crate::audio::MIX_RATE as u64;
-    let (t0, t1) = (p.trim_start, p.trim_end.min(p.rec.duration));
-    let frames = ((t1 - t0) * fps as f64).floor().max(1.0) as u64;
+    let tl = Timeline::new(p);
+    let frames = (tl.duration * fps as f64).floor().max(1.0) as u64;
     let period = 10_000_000 / fps as i64;
-    dec.seek(secs_to_hns(t0))?;
+    dec.seek(secs_to_hns(tl.to_rec(0.0)))?;
     for i in 0..frames {
         if cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
-        let t = t0 + i as f64 / fps as f64;
+        let t = tl.to_rec(i as f64 / fps as f64);
         dec.frame_at(&gpu, secs_to_hns(t))?;
         comp.render(&d2d, dec.frame_srv.as_ref(), p, &motion, t, fps as f64)?;
         let tex = enc.next_texture();
@@ -95,7 +95,7 @@ pub fn run(p: &Project, out: &std::path::Path, progress: &AtomicU32, cancel: &At
         if audio {
             // Audio for exactly this frame's time span keeps both streams interleaved.
             let (n0, n1) = (i * rate / fps as u64, (i + 1) * rate / fps as u64);
-            let pcm = tracks.render_pcm16(t0, n0, n1, p.style.sys_volume, p.style.mic_volume);
+            let pcm = render_pcm16(&tracks, &tl, n0, n1, p.style.sys_volume, p.style.mic_volume);
             enc.submit_audio(&pcm, (n0 * 10_000_000 / rate) as i64)?;
         }
         progress.store(((i + 1) * 10000 / frames) as u32, Ordering::Relaxed);
@@ -131,15 +131,15 @@ pub fn run_gif(p: &Project, out: &std::path::Path, progress: &AtomicU32, cancel:
     unsafe { gpu.device.CreateTexture2D(&desc, None, Some(&mut staging)) }.ctx("staging texture")?;
     let staging = staging.ok_or("no staging texture")?;
     let mut gif = crate::gif::GifWriter::create(out, w, h)?;
-    let (t0, t1) = (p.trim_start, p.trim_end.min(p.rec.duration));
-    let frames = ((t1 - t0) * fps as f64).floor().max(1.0) as u64;
+    let tl = Timeline::new(p);
+    let frames = (tl.duration * fps as f64).floor().max(1.0) as u64;
     let cs = |i: u64| (i * 100 + fps as u64 / 2) / fps as u64; // centiseconds, rounded
-    dec.seek(secs_to_hns(t0))?;
+    dec.seek(secs_to_hns(tl.to_rec(0.0)))?;
     for i in 0..frames {
         if cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
-        let t = t0 + i as f64 / fps as f64;
+        let t = tl.to_rec(i as f64 / fps as f64);
         dec.frame_at(&gpu, secs_to_hns(t))?;
         comp.render(&d2d, dec.frame_srv.as_ref(), p, &motion, t, fps as f64)?;
         unsafe {
@@ -155,4 +155,19 @@ pub fn run_gif(p: &Project, out: &std::path::Path, progress: &AtomicU32, cancel:
         progress.store(((i + 1) * 10000 / frames) as u32, Ordering::Relaxed);
     }
     gif.finish()
+}
+
+/// 16-bit stereo PCM for output sample frames [n0, n1), following the edited
+/// timeline. Audio fades over a few milliseconds at each cut so joins don't click.
+fn render_pcm16(tracks: &crate::audio::Tracks, tl: &Timeline, n0: u64, n1: u64, sys: f32, mic: f32) -> Vec<i16> {
+    let rate = crate::audio::MIX_RATE as f64;
+    let mut out = Vec::with_capacity(((n1 - n0) * 2) as usize);
+    for n in n0..n1 {
+        let (t, edge) = tl.to_rec_edge(n as f64 / rate);
+        let g = (edge / 0.006).min(1.0) as f32;
+        let (l, r) = tracks.mix(t, sys, mic);
+        out.push((l * g * 32767.0) as i16);
+        out.push((r * g * 32767.0) as i16);
+    }
+    out
 }

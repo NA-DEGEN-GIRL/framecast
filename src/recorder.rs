@@ -12,6 +12,7 @@ use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THR
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 
 use crate::capture::{Capturer, Target};
+use crate::clock::RecClock;
 use crate::gpu::Gpu;
 use crate::input::{CursorSampler, InputLogger};
 use crate::log;
@@ -30,13 +31,20 @@ pub struct RecordOptions {
 
 pub struct ActiveRecording {
     pub stop: Arc<AtomicBool>,
-    pub started_hns: i64,
+    pub clock: Arc<RecClock>,
     thread: Option<JoinHandle<Res<PathBuf>>>,
 }
 
 impl ActiveRecording {
+    /// Recorded length so far (pauses excluded).
     pub fn elapsed(&self) -> f64 {
-        (now_hns() - self.started_hns) as f64 / 1e7
+        self.clock.now() as f64 / 1e7
+    }
+    pub fn is_paused(&self) -> bool {
+        self.clock.is_paused()
+    }
+    pub fn toggle_pause(&self) {
+        self.clock.toggle();
     }
     pub fn stop_requested(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
@@ -61,7 +69,7 @@ pub fn start(opts: RecordOptions) -> Res<ActiveRecording> {
     std::fs::create_dir_all(&dir).ctx("create project folder")?;
     let stop = Arc::new(AtomicBool::new(false));
     let frames = Arc::new(AtomicU64::new(0));
-    let (tx, rx) = std::sync::mpsc::channel::<Res<i64>>();
+    let (tx, rx) = std::sync::mpsc::channel::<Res<Arc<RecClock>>>();
     let stop2 = stop.clone();
     let frames2 = frames.clone();
     let thread = std::thread::Builder::new()
@@ -69,8 +77,8 @@ pub fn start(opts: RecordOptions) -> Res<ActiveRecording> {
         .spawn(move || record_thread(opts, dir, stop2, frames2, tx))
         .ctx("spawn recorder")?;
     // Wait until capture actually started so the UI timer matches the video.
-    let started_hns = rx.recv().map_err(|_| "recorder failed to start".to_string())??;
-    Ok(ActiveRecording { stop, started_hns, thread: Some(thread) })
+    let clock = rx.recv().map_err(|_| "recorder failed to start".to_string())??;
+    Ok(ActiveRecording { stop, clock, thread: Some(thread) })
 }
 
 fn record_thread(
@@ -78,7 +86,7 @@ fn record_thread(
     dir: PathBuf,
     stop: Arc<AtomicBool>,
     frames: Arc<AtomicU64>,
-    started: std::sync::mpsc::Sender<Res<i64>>,
+    started: std::sync::mpsc::Sender<Res<Arc<RecClock>>>,
 ) -> Res<PathBuf> {
     let setup = (|| -> Res<_> {
         let gpu = Gpu::new()?;
@@ -115,17 +123,17 @@ fn record_thread(
     let sampler = CursorSampler::new();
     let mut cursor: Vec<CursorSample> = Vec::with_capacity(60 * 60 * 10);
 
-    let start = now_hns();
+    let clock = Arc::new(RecClock::new(now_hns()));
     // Hooks log screen coordinates; they're mapped into the video after recording.
-    let input = InputLogger::start(start, (0, 0), opts.all_keys, stop.clone());
+    let input = InputLogger::start(clock.clone(), (0, 0), opts.all_keys, stop.clone());
     let mut audio = Vec::new();
     if opts.system_audio {
-        audio.push(crate::audio::Capture::start(crate::audio::Source::System, &dir, start));
+        audio.push(crate::audio::Capture::start(crate::audio::Source::System, &dir, clock.clone()));
     }
     if opts.mic {
-        audio.push(crate::audio::Capture::start(crate::audio::Source::Mic, &dir, start));
+        audio.push(crate::audio::Capture::start(crate::audio::Source::Mic, &dir, clock.clone()));
     }
-    let _ = started.send(Ok(start));
+    let _ = started.send(Ok(clock.clone()));
     log!("recording {}x{} @{}fps -> {}", w, h, opts.fps, dir.display());
 
     let period = 10_000_000 / opts.fps as i64;
@@ -134,8 +142,17 @@ fn record_thread(
     let mut last_written: i64 = -1;
     let mut result = Ok(());
     while !stop.load(Ordering::SeqCst) {
-        let due = start + idx * period;
-        let now = now_hns();
+        if clock.is_paused() {
+            // Keep draining the capture pool so the first frame after resuming is fresh.
+            if cap.copy_latest(&gpu, &latest) {
+                have_frame = true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            continue;
+        }
+        // Schedule on the active timeline: resuming continues right where we paused.
+        let due = idx * period;
+        let now = clock.now();
         if now < due {
             let wait = due - now;
             if wait > 15_000 {
@@ -210,6 +227,7 @@ fn record_thread(
         .collect();
     let rec = Recording {
         source: opts.target.label(),
+        cuts: clock.cuts(),
         width: w,
         height: h,
         fps: opts.fps,

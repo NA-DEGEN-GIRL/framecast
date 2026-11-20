@@ -15,7 +15,7 @@ use crate::capture::{self, Monitor, Target};
 use crate::d2d::{D2d, rgba};
 use crate::export::{self, ExportJob};
 use crate::gpu::Gpu;
-use crate::input::STOP_HOTKEY_LABEL;
+use crate::input::{PAUSE_HOTKEY_LABEL, STOP_HOTKEY_LABEL};
 use crate::log;
 use crate::media::Decoder;
 use crate::project::{self, ASPECTS, BACKGROUNDS, CLICK_EFFECTS, Motion, Project, RESOLUTIONS, Style, ZoomSeg};
@@ -303,7 +303,7 @@ impl App {
         match recorder::start(opts) {
             Ok(rec) => {
                 let s = self.main.dpi_scale();
-                let (w, h) = ((248.0 * s) as i32, (52.0 * s) as i32);
+                let (w, h) = ((300.0 * s) as i32, (52.0 * s) as i32);
                 let gap = (12.0 * s) as i32;
                 // Just above what's being recorded (or inside its top edge if there's no room).
                 let x = ((tr.left + tr.right) / 2 - w / 2).clamp(mon.left, (mon.right - w).max(mon.left));
@@ -320,7 +320,7 @@ impl App {
                     }
                 }
                 if let Some(bar) = &self.bar {
-                    bar.set_drag_except_right((96.0 * s) as i32);
+                    bar.set_drag_except_right((150.0 * s) as i32);
                 }
                 self.screen = Screen::Recording(rec);
             }
@@ -395,13 +395,27 @@ impl App {
                 }
             }
             Screen::Recording(rec) => {
-                let pulse = 0.55 + 0.45 * ((ui.time * 3.0).sin() * 0.5 + 0.5) as f32;
-                let (right, left) = full.cut_right(ui.px(96.0));
-                ui.circle(d2d, left.x + ui.px(24.0), left.cy(), ui.px(6.0), rgba(RED, pulse));
+                let paused = rec.is_paused();
+                let (right, left) = full.cut_right(ui.px(150.0));
+                if paused {
+                    // Steady amber "pause" glyph instead of the pulsing red dot.
+                    let (x, y) = (left.x + ui.px(20.0), left.cy());
+                    ui.fill(d2d, Rect::new(x, y - ui.px(6.0), ui.px(3.5), ui.px(12.0)), 1.0, rgba(AMBER, 1.0));
+                    ui.fill(d2d, Rect::new(x + ui.px(6.5), y - ui.px(6.0), ui.px(3.5), ui.px(12.0)), 1.0, rgba(AMBER, 1.0));
+                } else {
+                    let pulse = 0.55 + 0.45 * ((ui.time * 3.0).sin() * 0.5 + 0.5) as f32;
+                    ui.circle(d2d, left.x + ui.px(24.0), left.cy(), ui.px(6.0), rgba(RED, pulse));
+                }
                 let tr = Rect::new(left.x + ui.px(40.0), left.y, left.w - ui.px(40.0), left.h);
-                ui.text(d2d, tr, &fmt_time(rec.elapsed()), 16.0, W_SEMI, rgba(TEXT, 1.0), Align::Left);
-                let b = right.inset_xy(ui.px(8.0), ui.px(9.0));
-                if ui.button(d2d, id("stop"), b, "■  Stop", ButtonKind::Danger) {
+                let label = if paused { format!("Paused  {}", fmt_time(rec.elapsed())) } else { fmt_time(rec.elapsed()) };
+                ui.text(d2d, tr, &label, 16.0, W_SEMI, rgba(if paused { AMBER } else { TEXT }, 1.0), Align::Left);
+                let row = right.inset_xy(ui.px(8.0), ui.px(9.0));
+                let (stop_r, pause_r) = row.cut_right(ui.px(84.0));
+                let pause_r = Rect::new(pause_r.x, pause_r.y, pause_r.w - ui.px(6.0), pause_r.h);
+                if ui.button(d2d, id("pause"), pause_r, if paused { "▶" } else { "❚❚" }, ButtonKind::Secondary) {
+                    rec.toggle_pause();
+                }
+                if ui.button(d2d, id("stop"), stop_r, "■  Stop", ButtonKind::Danger) {
                     stop = true;
                 }
             }
@@ -516,7 +530,7 @@ impl App {
             d2d,
             c,
             &format!(
-                "Stop with {STOP_HOTKEY_LABEL} or the floating Stop button (it never shows up in the video). \
+                "Pause / resume with {PAUSE_HOTKEY_LABEL}, stop with {STOP_HOTKEY_LABEL} or the floating bar (it never shows up in the video). \
                  Cursor, clicks and shortcuts are stored separately, so you can restyle them afterwards."
             ),
             12.0,
@@ -1151,6 +1165,12 @@ impl Editor {
         ui.text(d2d, body.inset_xy(ui.px(14.0), 0.0), "Recording", 12.0, W_SEMI, rgba(TEXT, 0.85), Align::Left);
         for c in self.p.rec.clicks.iter().filter(|c| c.down) {
             ui.circle(d2d, x_of(c.t), clip.b() - ui.px(9.0), ui.px(3.0), rgba(0xffffff, 0.8));
+        }
+        // Where the recording was paused: a seam the viewer won't see, but useful to know.
+        for &c in &self.p.rec.cuts {
+            let x = x_of(c);
+            ui.line(d2d, x, clip.y + ui.px(4.0), x, clip.b() - ui.px(4.0), rgba(AMBER, 0.9), ui.px(2.0));
+            ui.circle(d2d, x, clip.y + ui.px(4.0), ui.px(3.5), rgba(AMBER, 1.0));
         }
         for k in &self.p.rec.keys {
             let x = x_of(k.t);

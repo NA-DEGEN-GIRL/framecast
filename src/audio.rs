@@ -13,7 +13,8 @@ use windows::Win32::Media::Audio::*;
 use windows::Win32::System::Com::*;
 
 use crate::log;
-use crate::util::{Ctx, Res, now_hns};
+use crate::clock::RecClock;
+use crate::util::{Ctx, Res};
 
 /// Sample rate used for mixing and export.
 pub const MIX_RATE: u32 = 48_000;
@@ -166,15 +167,15 @@ pub struct Capture {
 }
 
 impl Capture {
-    /// Starts capturing `src` into `dir/<src>.wav`. Timeline zero is `start_hns`.
-    pub fn start(src: Source, dir: &Path, start_hns: i64) -> Capture {
+    /// Starts capturing `src` into `dir/<src>.wav`, placed on the recording clock.
+    pub fn start(src: Source, dir: &Path, clock: Arc<RecClock>) -> Capture {
         let stop = Arc::new(AtomicBool::new(false));
         let s2 = stop.clone();
         let path = dir.join(src.file());
         let thread = std::thread::Builder::new()
             .name("audio-capture".into())
             .spawn(move || {
-                let r = capture_thread(src, &path, start_hns, &s2);
+                let r = capture_thread(src, &path, &clock, &s2);
                 if let Err(e) = &r {
                     log!("audio capture ({}) failed: {e}", src.file());
                     let _ = std::fs::remove_file(&path);
@@ -228,7 +229,7 @@ pub fn has_device(src: Source) -> bool {
     device(if src == Source::Mic { eCapture } else { eRender }).is_ok()
 }
 
-fn capture_thread(src: Source, path: &Path, start_hns: i64, stop: &AtomicBool) -> Res<()> {
+fn capture_thread(src: Source, path: &Path, clock: &RecClock, stop: &AtomicBool) -> Res<()> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let dev = device(if src == Source::System { eRender } else { eCapture })?;
@@ -278,8 +279,9 @@ fn capture_thread(src: Source, path: &Path, start_hns: i64, stop: &AtomicBool) -
                     stereo.push(sample(1));
                 }
                 let _ = cap.ReleaseBuffer(frames);
-                // Place the packet where the clock says it belongs.
-                let expected = ((qpc as i64 - start_hns) as f64 / 1e7 * rate).round() as i64;
+                // Place the packet where the clock says it belongs; drop it while paused.
+                let Some(active) = clock.active(qpc as i64) else { continue };
+                let expected = (active as f64 / 1e7 * rate).round() as i64;
                 let mut skip = 0usize;
                 if expected < 0 {
                     skip = (-expected) as usize; // captured before t=0
@@ -298,7 +300,7 @@ fn capture_thread(src: Source, path: &Path, start_hns: i64, stop: &AtomicBool) -
         }
         let _ = client.Stop();
         // Pad up to the stop time so the file covers the whole recording.
-        let end = ((now_hns() - start_hns) as f64 / 1e7 * rate) as i64;
+        let end = (clock.now() as f64 / 1e7 * rate) as i64;
         if end > wav.frames as i64 {
             wav.silence((end - wav.frames as i64) as u64);
         }

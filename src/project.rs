@@ -21,6 +21,8 @@ pub struct CursorSample {
 pub struct Recording {
     /// What was recorded ("Display 3840×2160", a window title, "Area 1280×720").
     pub source: String,
+    /// Seconds where the recording was paused and resumed.
+    pub cuts: Vec<f64>,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -59,6 +61,7 @@ impl Recording {
         let mut j = Json::obj();
         j.set("version", 1)
             .set("source", self.source.as_str())
+            .set("cuts", self.cuts.iter().map(|c| Json::Num((c * 1000.0).round() / 1000.0)).collect::<Vec<_>>())
             .set("width", self.width)
             .set("height", self.height)
             .set("fps", self.fps)
@@ -99,6 +102,7 @@ impl Recording {
             .collect();
         Ok(Recording {
             source: j.str_or("source", "").to_string(),
+            cuts: j.arr("cuts").iter().filter_map(|v| v.as_f64()).collect(),
             width: j.f64_or("width", 1920.0) as u32,
             height: j.f64_or("height", 1080.0) as u32,
             fps: j.f64_or("fps", 60.0) as u32,

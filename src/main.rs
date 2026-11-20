@@ -5,6 +5,7 @@
 mod app;
 mod audio;
 mod capture;
+mod clock;
 mod d2d;
 mod export;
 mod gpu;

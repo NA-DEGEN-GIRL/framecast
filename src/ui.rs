@@ -24,6 +24,7 @@ pub mod theme {
     pub const RED: u32 = 0xFF4D5E;
     pub const RED_HI: u32 = 0xFF6B79;
     pub const GREEN: u32 = 0x3DDC97;
+    pub const AMBER: u32 = 0xFFC145;
 }
 use theme::*;
 

@@ -8,6 +8,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::clock::RecClock;
 use crate::util::now_hns;
 
 #[derive(Clone, Copy, Debug)]
@@ -32,7 +33,7 @@ pub struct Log {
 }
 
 struct HookState {
-    start_hns: i64,
+    clock: Arc<RecClock>,
     origin: (i32, i32),
     log: Log,
     all_keys: bool,
@@ -45,6 +46,9 @@ static HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
 /// Hotkey that stops a recording from anywhere: Ctrl + Shift + F9.
 pub const STOP_HOTKEY_LABEL: &str = "Ctrl + Shift + F9";
 const HOTKEY_ID: i32 = 0xF9;
+/// Hotkey that pauses / resumes: Ctrl + Shift + F10.
+pub const PAUSE_HOTKEY_LABEL: &str = "Ctrl + Shift + F10";
+const PAUSE_HOTKEY_ID: i32 = 0xFA;
 
 unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
@@ -59,10 +63,18 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
                 WM_MBUTTONUP => (2, false),
                 _ => (255, false),
             };
-            if button != 255 {
+            // Clicks on our own recording bar are controls, not part of the demo.
+            let ours = || {
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(WindowFromPoint(info.pt), Some(&mut pid));
+                pid == std::process::id()
+            };
+            if button != 255 && !ours() {
                 if let Ok(mut g) = STATE.lock() {
                     if let Some(s) = g.as_mut() {
-                        let t = (now_hns() - s.start_hns) as f64 / 1e7;
+                        // Clicks while paused aren't part of the video.
+                        let Some(t) = s.clock.active(now_hns()) else { return CallNextHookEx(None, code, wp, lp) };
+                        let t = t as f64 / 1e7;
                         let (ox, oy) = s.origin;
                         s.log.clicks.push(Click {
                             t,
@@ -141,10 +153,12 @@ unsafe extern "system" fn keyboard_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LR
                 let vk = VIRTUAL_KEY(info.vkCode as u16);
                 let special = matches!(vk, VK_RETURN | VK_ESCAPE | VK_TAB | VK_DELETE)
                     || (VK_F1.0..=VK_F24.0).contains(&vk.0);
+                // Our own stop / pause hotkeys shouldn't show up as badges.
+                let own_hotkey = ctrl && shift && !alt && matches!(vk, VK_F9 | VK_F10);
                 if let Ok(mut g) = STATE.lock() {
                     if let Some(s) = g.as_mut() {
                         // Privacy: by default only shortcuts are logged, never plain typing.
-                        if ctrl || alt || win || special || s.all_keys {
+                        if !own_hotkey && (ctrl || alt || win || special || s.all_keys) {
                             let mut parts = Vec::new();
                             if ctrl {
                                 parts.push("Ctrl".to_string());
@@ -159,8 +173,9 @@ unsafe extern "system" fn keyboard_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LR
                                 parts.push("Win".to_string());
                             }
                             parts.push(key_name(info));
-                            let t = (now_hns() - s.start_hns) as f64 / 1e7;
-                            s.log.keys.push(Key { t, label: parts.join(" + ") });
+                            if let Some(t) = s.clock.active(now_hns()) {
+                                s.log.keys.push(Key { t: t as f64 / 1e7, label: parts.join(" + ") });
+                            }
                         }
                     }
                 }
@@ -176,8 +191,8 @@ pub struct InputLogger {
 
 impl InputLogger {
     /// `origin`: top-left of the recorded monitor in virtual-screen pixels.
-    pub fn start(start_hns: i64, origin: (i32, i32), all_keys: bool, stop: Arc<AtomicBool>) -> InputLogger {
-        *STATE.lock().unwrap() = Some(HookState { start_hns, origin, log: Log::default(), all_keys });
+    pub fn start(clock: Arc<RecClock>, origin: (i32, i32), all_keys: bool, stop: Arc<AtomicBool>) -> InputLogger {
+        *STATE.lock().unwrap() = Some(HookState { clock, origin, log: Log::default(), all_keys });
         *STOP_FLAG.lock().unwrap() = Some(stop);
         let (tx, rx) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || unsafe {
@@ -185,6 +200,7 @@ impl InputLogger {
             let m = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), None, 0).ok();
             let k = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), None, 0).ok();
             let hk = RegisterHotKey(None, HOTKEY_ID, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_F9.0 as u32).is_ok();
+            let hk_pause = RegisterHotKey(None, PAUSE_HOTKEY_ID, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_F10.0 as u32).is_ok();
             let _ = tx.send(());
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -193,9 +209,17 @@ impl InputLogger {
                         f.store(true, Ordering::SeqCst);
                     }
                 }
+                if msg.message == WM_HOTKEY && msg.wParam.0 as i32 == PAUSE_HOTKEY_ID {
+                    if let Some(s) = STATE.lock().unwrap().as_ref() {
+                        s.clock.toggle();
+                    }
+                }
             }
             if hk {
                 let _ = UnregisterHotKey(None, HOTKEY_ID);
+            }
+            if hk_pause {
+                let _ = UnregisterHotKey(None, PAUSE_HOTKEY_ID);
             }
             if let Some(m) = m {
                 let _ = UnhookWindowsHookEx(m);

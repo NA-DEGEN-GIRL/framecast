@@ -19,6 +19,8 @@ pub struct CursorSample {
 
 #[derive(Clone)]
 pub struct Recording {
+    /// What was recorded ("Display 3840×2160", a window title, "Area 1280×720").
+    pub source: String,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -56,6 +58,7 @@ impl Recording {
         }
         let mut j = Json::obj();
         j.set("version", 1)
+            .set("source", self.source.as_str())
             .set("width", self.width)
             .set("height", self.height)
             .set("fps", self.fps)
@@ -95,6 +98,7 @@ impl Recording {
             .map(|k| Key { t: k.f64_or("t", 0.0), label: k.str_or("label", "").to_string() })
             .collect();
         Ok(Recording {
+            source: j.str_or("source", "").to_string(),
             width: j.f64_or("width", 1920.0) as u32,
             height: j.f64_or("height", 1080.0) as u32,
             fps: j.f64_or("fps", 60.0) as u32,
@@ -487,21 +491,19 @@ impl Motion {
 }
 
 /// Lists recordings in the app folder, newest first.
-pub fn recent_projects() -> Vec<(std::path::PathBuf, String, f64)> {
+pub fn recent_projects() -> Vec<(std::path::PathBuf, String, f64, String)> {
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(crate::util::app_dir()) {
         for e in rd.flatten() {
             let p = e.path();
             if p.join("events.json").exists() && p.join("raw.mp4").exists() {
                 let name = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                let dur = std::fs::read_to_string(p.join("events.json"))
+                let (dur, source) = std::fs::read_to_string(p.join("events.json"))
                     .ok()
-                    .and_then(|s| {
-                        // Cheap: duration is near the start of the file; parse all only if needed.
-                        Json::parse(&s).ok().map(|j| j.f64_or("duration", 0.0))
-                    })
-                    .unwrap_or(0.0);
-                out.push((p, name, dur));
+                    .and_then(|s| Json::parse(&s).ok())
+                    .map(|j| (j.f64_or("duration", 0.0), j.str_or("source", "").to_string()))
+                    .unwrap_or_default();
+                out.push((p, name, dur, source));
             }
         }
     }

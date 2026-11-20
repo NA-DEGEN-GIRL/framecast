@@ -40,6 +40,7 @@ pub enum CursorShape {
     Arrow,
     Hand,
     SizeWE,
+    Cross,
 }
 
 struct WinState {
@@ -184,6 +185,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     CursorShape::Arrow => IDC_ARROW,
                     CursorShape::Hand => IDC_HAND,
                     CursorShape::SizeWE => IDC_SIZEWE,
+                    CursorShape::Cross => IDC_CROSS,
                 };
                 if let Ok(c) = LoadCursorW(None, id) {
                     SetCursor(Some(c));
@@ -258,6 +260,8 @@ pub enum Kind {
     Main,
     /// Small always-on-top bar, invisible to screen capture.
     Floating,
+    /// Borderless full-screen picker.
+    Overlay,
 }
 
 impl Surface {
@@ -268,7 +272,7 @@ impl Surface {
             let t = wide(title);
             let (ex, style) = match kind {
                 Kind::Main => (WINDOW_EX_STYLE(0), WS_OVERLAPPEDWINDOW),
-                Kind::Floating => (WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_POPUP),
+                Kind::Floating | Kind::Overlay => (WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_POPUP),
             };
             let hwnd = CreateWindowExW(ex, PCWSTR(cls.as_ptr()), PCWSTR(t.as_ptr()), style, x, y, w, h, None, None, None, None)
                 .ctx("CreateWindowExW")?;

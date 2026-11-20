@@ -11,7 +11,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows_numerics::Matrix3x2;
 
-use crate::capture::{self, Monitor};
+use crate::capture::{self, Monitor, Target};
 use crate::d2d::{D2d, rgba};
 use crate::export::{self, ExportJob};
 use crate::gpu::Gpu;
@@ -21,6 +21,7 @@ use crate::media::Decoder;
 use crate::project::{self, ASPECTS, BACKGROUNDS, CLICK_EFFECTS, Motion, Project, RESOLUTIONS, Style, ZoomSeg};
 use crate::recorder::{self, ActiveRecording, RecordOptions};
 use crate::render::Compositor;
+use crate::selector::{self, Outcome, Selector};
 use crate::ui::theme::*;
 use crate::ui::{Align, ButtonKind, Rect, Ui, id, idx};
 use crate::util::{Res, fmt_time, secs_to_hns, wide};
@@ -32,6 +33,7 @@ const W_BOLD: DWRITE_FONT_WEIGHT = DWRITE_FONT_WEIGHT_BOLD;
 
 enum Screen {
     Home,
+    Selecting { sel: Box<Selector>, opts: RecordOptions },
     Countdown { until: Instant, opts: RecordOptions },
     Recording(ActiveRecording),
     Editor(Box<Editor>),
@@ -45,13 +47,15 @@ pub struct App {
     screen: Screen,
     monitors: Vec<Monitor>,
     mon_sel: usize,
+    /// 0 full screen, 1 window, 2 area
+    mode_sel: usize,
     fps_sel: usize,
     countdown: bool,
     all_keys: bool,
     sys_audio: bool,
     mic: bool,
     has_mic: bool,
-    recents: Vec<(PathBuf, String, f64)>,
+    recents: Vec<(PathBuf, String, f64, String)>,
     toast: Option<(String, Instant, bool)>,
     bar: Option<Surface>,
     bar_ui: Ui,
@@ -102,6 +106,7 @@ impl App {
             screen: Screen::Home,
             monitors,
             mon_sel: 0,
+            mode_sel: 0,
             fps_sel: 1,
             countdown: true,
             all_keys: false,
@@ -144,6 +149,7 @@ impl App {
     /// One UI frame. Returns true if something is animating (keep rendering).
     fn frame(&mut self) -> Res<bool> {
         let mut busy = false;
+        busy |= self.select_frame()?;
         // Floating bar (countdown / recording).
         busy |= self.bar_frame()?;
 
@@ -215,25 +221,26 @@ impl App {
                     return Ok(());
                 };
                 let opts = RecordOptions {
-                    monitor: mon.clone(),
+                    target: Target::Display(mon.clone()),
                     fps: [30, 60][self.fps_sel],
                     all_keys: self.all_keys,
                     system_audio: self.sys_audio,
                     mic: self.mic && self.has_mic,
                 };
                 self.main.show(SW_HIDE);
-                if self.countdown {
-                    let s = self.main.dpi_scale();
-                    let sz = (180.0 * s) as i32;
-                    let (cx, cy) = ((mon.rect.left + mon.rect.right) / 2, (mon.rect.top + mon.rect.bottom) / 2);
-                    let bar = Surface::create(&self.gpu, "Framecast countdown", Kind::Floating, cx - sz / 2, cy - sz / 2, sz, sz)?;
-                    bar.show(SW_SHOWNOACTIVATE);
-                    self.bar = Some(bar);
-                    self.screen = Screen::Countdown { until: Instant::now() + Duration::from_secs(3), opts };
+                // Give the hidden main window a moment to disappear from the screen.
+                std::thread::sleep(Duration::from_millis(250));
+                if self.mode_sel == 0 {
+                    self.target_chosen(opts)?;
                 } else {
-                    // Give the hidden main window a moment to disappear from the screen.
-                    std::thread::sleep(Duration::from_millis(250));
-                    self.begin_recording(opts)?;
+                    let mode = if self.mode_sel == 1 { selector::Mode::Window } else { selector::Mode::Area };
+                    match Selector::new(&self.gpu, &self.d2d, &mon, mode) {
+                        Ok(sel) => self.screen = Screen::Selecting { sel: Box::new(sel), opts },
+                        Err(e) => {
+                            self.main.show(SW_SHOWNORMAL);
+                            self.toast(&format!("Couldn't open the picker: {e}"), true);
+                        }
+                    }
                 }
             }
             Action::Open(dir) => match Editor::open(&self.gpu, &self.d2d, &dir) {
@@ -253,14 +260,54 @@ impl App {
         Ok(())
     }
 
+    /// Countdown (if enabled) and then recording, for an already chosen target.
+    fn target_chosen(&mut self, opts: RecordOptions) -> Res<()> {
+        if !self.countdown {
+            return self.begin_recording(opts);
+        }
+        let s = self.main.dpi_scale();
+        let sz = (180.0 * s) as i32;
+        let r = opts.target.screen_rect();
+        let (cx, cy) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+        let bar = Surface::create(&self.gpu, "Framecast countdown", Kind::Floating, cx - sz / 2, cy - sz / 2, sz, sz)?;
+        bar.show(SW_SHOWNOACTIVATE);
+        self.bar = Some(bar);
+        self.screen = Screen::Countdown { until: Instant::now() + Duration::from_secs(3), opts };
+        Ok(())
+    }
+
+    fn select_frame(&mut self) -> Res<bool> {
+        let Screen::Selecting { sel, .. } = &mut self.screen else { return Ok(false) };
+        match sel.frame(&self.d2d)? {
+            Outcome::Pending => {}
+            Outcome::Cancel => {
+                self.screen = Screen::Home;
+                self.main.show(SW_SHOWNORMAL);
+            }
+            Outcome::Done(target) => {
+                let Screen::Selecting { mut opts, .. } = std::mem::replace(&mut self.screen, Screen::Home) else { unreachable!() };
+                opts.target = target;
+                self.target_chosen(opts)?;
+            }
+        }
+        Ok(true)
+    }
+
     fn begin_recording(&mut self, opts: RecordOptions) -> Res<()> {
-        let mon = opts.monitor.clone();
+        let tr = opts.target.screen_rect();
+        let mon = self
+            .monitors
+            .iter()
+            .find(|m| m.handle == opts.target.monitor_handle())
+            .map_or(tr, |m| m.rect);
         match recorder::start(opts) {
             Ok(rec) => {
                 let s = self.main.dpi_scale();
                 let (w, h) = ((248.0 * s) as i32, (52.0 * s) as i32);
-                let x = (mon.rect.left + mon.rect.right) / 2 - w / 2;
-                let y = mon.rect.top + (20.0 * s) as i32;
+                let gap = (12.0 * s) as i32;
+                // Just above what's being recorded (or inside its top edge if there's no room).
+                let x = ((tr.left + tr.right) / 2 - w / 2).clamp(mon.left, (mon.right - w).max(mon.left));
+                let y = if tr.top - h - gap >= mon.top { tr.top - h - gap } else { tr.top.max(mon.top) + gap };
                 match self.bar.as_mut() {
                     Some(bar) => unsafe {
                         let _ = SetWindowPos(bar.hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
@@ -412,13 +459,18 @@ impl App {
         let right = Rect::new(right.x + gap, right.y, right.w - gap, right.h);
 
         // New recording card.
-        let card_h = ui.px(520.0).min(left.h);
+        let card_h = ui.px(600.0).min(left.h);
         let card = Rect::new(left.x, left.y, left.w, card_h);
         ui.fill(d2d, card, ui.px(14.0), rgba(PANEL, 1.0));
         ui.stroke(d2d, card, ui.px(14.0), rgba(BORDER, 1.0), 1.0);
         let c = card.inset(ui.px(24.0));
         let (r, c) = c.cut_top(ui.px(28.0));
         ui.text(d2d, r, "New recording", 18.0, W_SEMI, rgba(TEXT, 1.0), Align::Left);
+        let (_, c) = c.cut_top(ui.px(16.0));
+        let (r, c) = c.cut_top(ui.px(20.0));
+        ui.section(d2d, r, "Record");
+        let (r, c) = c.cut_top(ui.px(38.0));
+        ui.segmented(d2d, id("mode"), r, &["Full screen", "Window", "Area"], &mut self.mode_sel);
         let (_, c) = c.cut_top(ui.px(16.0));
         let (r, c) = c.cut_top(ui.px(20.0));
         ui.section(d2d, r, "Display");
@@ -455,7 +507,8 @@ impl App {
         }
         let (_, c) = c.cut_top(ui.px(16.0));
         let (r, c) = c.cut_top(ui.px(52.0));
-        if ui.button(d2d, id("record"), r, "●   Start recording", ButtonKind::Danger) {
+        let label = ["●   Start recording", "●   Choose window…", "●   Select area…"][self.mode_sel.min(2)];
+        if ui.button(d2d, id("record"), r, label, ButtonKind::Danger) {
             action = Some(Action::StartRecording);
         }
         let (_, c) = c.cut_top(ui.px(14.0));
@@ -493,7 +546,7 @@ impl App {
             }
             self.home_scroll = self.home_scroll.clamp(0.0, (total - list.h).max(0.0));
             ui.push_clip(d2d, list);
-            for (i, (dir, name, dur)) in self.recents.iter().enumerate() {
+            for (i, (dir, name, dur, source)) in self.recents.iter().enumerate() {
                 let r = Rect::new(list.x, list.y + i as f32 * (row_h + ui.px(6.0)) - self.home_scroll, list.w, row_h);
                 if r.b() < list.y || r.y > list.b() {
                     continue;
@@ -506,7 +559,10 @@ impl App {
                 let inner = r.inset_xy(ui.px(16.0), 0.0);
                 ui.circle(d2d, inner.x + ui.px(8.0), inner.cy(), ui.px(8.0), rgba(ACCENT, 0.9));
                 let tr = Rect::new(inner.x + ui.px(28.0), inner.y, inner.w - ui.px(28.0), inner.h);
-                ui.text(d2d, tr, &pretty_name(name), 14.0, W_SEMI, rgba(TEXT, 1.0), Align::Left);
+                let (top, bottom) = tr.inset_xy(0.0, ui.px(8.0)).cut_top(ui.px(22.0));
+                ui.text(d2d, top, &pretty_name(name), 14.0, W_SEMI, rgba(TEXT, 1.0), Align::Left);
+                let src = if source.is_empty() { "Recording" } else { source.as_str() };
+                ui.text(d2d, Rect::new(bottom.x, bottom.y, bottom.w - ui.px(130.0), bottom.h), src, 12.0, W_NORMAL, rgba(MUTED, 1.0), Align::Left);
                 ui.text(d2d, tr, &format!("{}   Open →", fmt_time(*dur)), 12.5, W_NORMAL, rgba(if hov { TEXT } else { MUTED }, 1.0), Align::Right);
                 if clicked {
                     action = Some(Action::Open(dir.clone()));
@@ -579,7 +635,10 @@ impl Editor {
         let comp = Compositor::new(gpu, d2d, w, h)?;
         let motion = Motion::build(&p);
         let snap = Snap { style: p.style.clone(), zooms: p.zooms.clone(), trim: (p.trim_start, p.trim_end) };
-        let title = pretty_name(&dir.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
+        let mut title = pretty_name(&dir.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
+        if !p.rec.source.is_empty() {
+            title = format!("{title}   ·   {}", p.rec.source);
+        }
         let t = p.trim_start;
         let tracks = crate::audio::Tracks::load(dir);
         let volumes = std::sync::Arc::new(std::sync::Mutex::new((p.style.sys_volume, p.style.mic_volume)));

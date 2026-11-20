@@ -14,6 +14,7 @@ mod media;
 mod project;
 mod recorder;
 mod render;
+mod selector;
 mod ui;
 mod util;
 mod window;
@@ -50,7 +51,7 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("--record") {
         let secs: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3.0);
         let mon = capture::monitors().into_iter().next().expect("no monitor");
-        let rec = recorder::start(recorder::RecordOptions { monitor: mon, fps: 60, all_keys: false, system_audio: true, mic: false }).expect("start");
+        let rec = recorder::start(recorder::RecordOptions { target: capture::Target::Display(mon), fps: 60, all_keys: false, system_audio: true, mic: false }).expect("start");
         while rec.elapsed() < secs && !rec.stop_requested() {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }

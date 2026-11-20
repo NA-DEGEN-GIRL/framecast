@@ -11,7 +11,7 @@ use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 
-use crate::capture::{Capturer, Monitor};
+use crate::capture::{Capturer, Target};
 use crate::gpu::Gpu;
 use crate::input::{CursorSampler, InputLogger};
 use crate::log;
@@ -21,7 +21,7 @@ use crate::util::{Ctx, Res, now_hns};
 
 #[derive(Clone)]
 pub struct RecordOptions {
-    pub monitor: Monitor,
+    pub target: Target,
     pub fps: u32,
     pub all_keys: bool,
     pub system_audio: bool,
@@ -82,14 +82,14 @@ fn record_thread(
 ) -> Res<PathBuf> {
     let setup = (|| -> Res<_> {
         let gpu = Gpu::new()?;
-        let cap = Capturer::new(&gpu, &opts.monitor)?;
+        let cap = Capturer::new(&gpu, &opts.target)?;
         // H.264 needs even dimensions.
         let w = cap.width & !1;
         let h = cap.height & !1;
         let px_rate = w as f64 * h as f64 * opts.fps as f64;
         let bitrate = (px_rate * 0.14).clamp(8e6, 90e6) as u32;
         let enc = Encoder::new(&gpu, &dir.join("raw.mp4"), &EncoderConfig { width: w, height: h, fps: opts.fps, bitrate, audio: false })?;
-        let latest = gpu.texture(w, h, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, false)?;
+        let latest = gpu.texture(w, h, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET, false)?;
         Ok((gpu, cap, enc, latest, w, h))
     })();
     let (gpu, mut cap, mut enc, latest, w, h) = match setup {
@@ -104,16 +104,20 @@ fn record_thread(
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     }
 
-    let origin = (opts.monitor.rect.left, opts.monitor.rect.top);
+    let mut origin = opts.target.origin();
+    let follow = matches!(opts.target, Target::Window(_));
     let mut dpi = (96u32, 96u32);
     unsafe {
-        let _ = GetDpiForMonitor(HMONITOR(opts.monitor.handle as _), MDT_EFFECTIVE_DPI, &mut dpi.0, &mut dpi.1);
+        let _ = GetDpiForMonitor(HMONITOR(opts.target.monitor_handle() as _), MDT_EFFECTIVE_DPI, &mut dpi.0, &mut dpi.1);
     }
+    // Where the recorded pixels were on screen over time (moves with a recorded window).
+    let mut origins: Vec<(f64, i32, i32)> = Vec::with_capacity(60 * 60 * 10);
     let sampler = CursorSampler::new();
     let mut cursor: Vec<CursorSample> = Vec::with_capacity(60 * 60 * 10);
 
     let start = now_hns();
-    let input = InputLogger::start(start, origin, opts.all_keys, stop.clone());
+    // Hooks log screen coordinates; they're mapped into the video after recording.
+    let input = InputLogger::start(start, (0, 0), opts.all_keys, stop.clone());
     let mut audio = Vec::new();
     if opts.system_audio {
         audio.push(crate::audio::Capture::start(crate::audio::Source::System, &dir, start));
@@ -150,8 +154,13 @@ fn record_thread(
             have_frame = true;
         }
         let (cx, cy, kind) = sampler.sample();
+        let t = (idx * period) as f64 / 1e7;
+        if follow {
+            origin = opts.target.origin();
+        }
+        origins.push((t, origin.0, origin.1));
         cursor.push(CursorSample {
-            t: (idx * period) as f64 / 1e7,
+            t,
             x: (cx - origin.0) as f32,
             y: (cy - origin.1) as f32,
             kind: kind as i32,
@@ -186,14 +195,28 @@ fn record_thread(
     if last_written < 0 {
         return Err("no frames captured".into());
     }
+    // Map clicks into video coordinates and drop the ones outside the recorded area.
+    let clicks = log
+        .clicks
+        .into_iter()
+        .filter_map(|mut c| {
+            let i = origins.partition_point(|o| o.0 <= c.t).saturating_sub(1);
+            let (_, ox, oy) = origins.get(i).copied().unwrap_or((0.0, origin.0, origin.1));
+            c.x -= ox as f32;
+            c.y -= oy as f32;
+            let inside = c.x >= 0.0 && c.y >= 0.0 && c.x < w as f32 && c.y < h as f32;
+            (inside || !c.down).then_some(c)
+        })
+        .collect();
     let rec = Recording {
+        source: opts.target.label(),
         width: w,
         height: h,
         fps: opts.fps,
         duration,
         dpi_scale: dpi.0 as f32 / 96.0,
         cursor,
-        clicks: log.clicks,
+        clicks,
         keys: log.keys,
     };
     rec.save(&dir)?;

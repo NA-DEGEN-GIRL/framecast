@@ -156,7 +156,11 @@ pub const GIF_FPS: &[(&str, u32)] = &[("10 fps", 10), ("15 fps", 15), ("20 fps",
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Style {
+    /// Index into BACKGROUNDS, or BACKGROUNDS.len() for the custom image.
     pub background: usize,
+    /// Image file inside the project folder (empty = none chosen yet).
+    pub bg_image: String,
+    pub bg_blur: f32, // 0..1
     pub padding: f32,      // fraction of the shorter canvas side
     pub radius: f32,       // corner radius, fraction of the shorter content side
     pub shadow: f32,       // 0..1
@@ -180,6 +184,8 @@ impl Default for Style {
     fn default() -> Self {
         Style {
             background: 0,
+            bg_image: String::new(),
+            bg_blur: 0.0,
             padding: 0.06,
             radius: 0.018,
             shadow: 0.6,
@@ -241,7 +247,9 @@ impl Project {
         if let Some(s) = j.get("style") {
             let idx = |k: &str, def: usize, n: usize| (s.f64_or(k, def as f64) as usize).min(n - 1);
             self.style = Style {
-                background: idx("background", d.background, BACKGROUNDS.len()),
+                background: idx("background", d.background, BACKGROUNDS.len() + 1),
+                bg_image: s.str_or("bg_image", "").to_string(),
+                bg_blur: s.f32_or("bg_blur", d.bg_blur).clamp(0.0, 1.0),
                 padding: s.f32_or("padding", d.padding).clamp(0.0, 0.25),
                 radius: s.f32_or("radius", d.radius).clamp(0.0, 0.1),
                 shadow: s.f32_or("shadow", d.shadow).clamp(0.0, 1.0),
@@ -279,6 +287,8 @@ impl Project {
         let s = &self.style;
         let mut st = Json::obj();
         st.set("background", s.background as u32)
+            .set("bg_image", s.bg_image.as_str())
+            .set("bg_blur", s.bg_blur)
             .set("padding", s.padding)
             .set("radius", s.radius)
             .set("shadow", s.shadow)
@@ -335,6 +345,14 @@ impl Project {
         let k = long / w.max(h) as f32;
         let even = |v: f32| ((v.round() as u32) + 1) & !1;
         (even(w as f32 * k), even(h as f32 * k))
+    }
+
+    /// Full path of the background image when the style uses one.
+    pub fn background_image(&self) -> Option<std::path::PathBuf> {
+        let s = &self.style;
+        // Only plain file names: never follow paths out of the project folder.
+        let safe = !s.bg_image.is_empty() && !s.bg_image.contains(['/', '\\', ':']) && !s.bg_image.starts_with('.');
+        (s.background == BACKGROUNDS.len() && safe).then(|| self.dir.join(&s.bg_image))
     }
 
     pub fn is_gif(&self) -> bool {

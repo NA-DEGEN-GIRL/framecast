@@ -11,6 +11,7 @@ mod export;
 mod gif;
 mod gpu;
 mod icon;
+mod image;
 mod input;
 mod json;
 mod media;

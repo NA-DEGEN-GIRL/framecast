@@ -173,6 +173,9 @@ impl App {
         // Editor renders its preview frame before the UI pass (shares the D2D context).
         if let Screen::Editor(ed) = &mut self.screen {
             busy |= ed.update(&self.gpu, &self.d2d, &mut self.ui)?;
+            if let Some(msg) = ed.notice.take() {
+                self.toast(&msg, true);
+            }
         }
 
         self.main.begin(&self.d2d)?;
@@ -256,6 +259,16 @@ impl App {
             }
             Action::OpenFolder(p) => open_in_explorer(&p, false),
             Action::Reveal(p) => open_in_explorer(&p, true),
+            Action::PickBackground => {
+                if let Screen::Editor(ed) = &mut self.screen {
+                    if ed.picker.is_none() {
+                        // The dialog is modal to our window but runs on its own thread,
+                        // so the editor keeps drawing behind it.
+                        let owner = self.main.hwnd.0 as isize;
+                        ed.picker = std::thread::Builder::new().name("file-dialog".into()).spawn(move || crate::image::pick(owner)).ok();
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -595,6 +608,7 @@ enum Action {
     Home,
     OpenFolder(PathBuf),
     Reveal(PathBuf),
+    PickBackground,
 }
 
 #[derive(Clone, PartialEq)]
@@ -639,6 +653,12 @@ struct Editor {
     tracks: crate::audio::Tracks,
     player: Option<crate::audio::Player>,
     volumes: std::sync::Arc<std::sync::Mutex<(f32, f32)>>,
+    picker: Option<std::thread::JoinHandle<Option<PathBuf>>>,
+    want_picker: bool,
+    /// Background image thumbnail for the sidebar tile: (file name, bitmap).
+    bg_thumb: Option<(String, ID2D1Bitmap1)>,
+    /// Error to show as a toast.
+    notice: Option<String>,
 }
 
 impl Editor {
@@ -660,6 +680,10 @@ impl Editor {
             tracks,
             player: None,
             volumes,
+            picker: None,
+            want_picker: false,
+            bg_thumb: None,
+            notice: None,
             p,
             motion,
             motion_key: snap.clone(),
@@ -806,12 +830,49 @@ impl Editor {
             }
         }
 
+        // Background image chosen in the dialog?
+        if self.picker.as_ref().is_some_and(|h| h.is_finished()) {
+            if let Some(src) = self.picker.take().and_then(|h| h.join().ok()).flatten() {
+                match crate::image::import_into(&self.p.dir, &src) {
+                    Ok(name) => {
+                        let before = self.snap();
+                        self.p.style.bg_image = name;
+                        self.p.style.background = BACKGROUNDS.len();
+                        self.push_undo(before);
+                    }
+                    Err(e) => self.notice = Some(format!("Couldn't use that image: {e}")),
+                }
+            }
+        }
+        if self.p.style.bg_image.is_empty() {
+            self.bg_thumb = None;
+        } else if self.bg_thumb.as_ref().is_none_or(|t| t.0 != self.p.style.bg_image) {
+            self.bg_thumb = Some((self.p.style.bg_image.clone(), self.load_thumb(d2d)?));
+        }
+
         // Export finished?
         if self.export.as_ref().is_some_and(|j| j.is_finished()) {
             let job = self.export.take().unwrap();
             self.export_result = Some(job.join());
         }
         Ok(need || self.save_at.is_some())
+    }
+
+    fn load_thumb(&self, d2d: &D2d) -> Res<ID2D1Bitmap1> {
+        let img = crate::image::load(&self.p.dir.join(&self.p.style.bg_image), 240, true)?;
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+            colorContext: std::mem::ManuallyDrop::new(None),
+        };
+        let size = D2D_SIZE_U { width: img.width, height: img.height };
+        unsafe { d2d.dc.CreateBitmap(size, Some(img.pixels.as_ptr() as _), img.width * 4, &props) }
+            .map_err(|e| format!("thumbnail: {e}"))
     }
 
     fn toggle_play(&mut self) {
@@ -848,6 +909,9 @@ impl Editor {
 
         if ui.edit_started {
             self.push_undo(before);
+        }
+        if std::mem::take(&mut self.want_picker) {
+            action = Some(Action::PickBackground);
         }
         action
     }
@@ -994,7 +1058,73 @@ impl Editor {
                 ui.text(d2d, r, name, 11.0, W_SEMI, rgba(0xffffff, 0.9), Align::Center);
             }
         }
-        y += (BACKGROUNDS.len().div_ceil(cols)) as f32 * (sh + gap) + ui.px(8.0);
+        // Last tile: your own image.
+        let n = BACKGROUNDS.len();
+        let r = Rect::new(x + (n % cols) as f32 * (sw + gap), y + (n / cols) as f32 * (sh + gap), sw, sh);
+        let (hov, _, clicked) = ui.behave(id("bg_image"), r);
+        if hov {
+            ui.cursor = CursorShape::Hand;
+        }
+        let selected = st.background == n && !st.bg_image.is_empty();
+        match &self.bg_thumb {
+            Some((_, bmp)) => unsafe {
+                // Center-crop the thumbnail to the tile's shape.
+                let sz = bmp.GetSize();
+                let k = (r.w / sz.width).max(r.h / sz.height);
+                let (cw, chh) = (r.w / k, r.h / k);
+                let src = crate::d2d::rect((sz.width - cw) * 0.5, (sz.height - chh) * 0.5, (sz.width + cw) * 0.5, (sz.height + chh) * 0.5);
+                if let Ok(g) = d2d.rounded(r.d2(), ui.px(8.0)) {
+                    let params = D2D1_LAYER_PARAMETERS1 {
+                        contentBounds: r.d2(),
+                        geometricMask: std::mem::ManuallyDrop::new(Some(g)),
+                        maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                        maskTransform: windows_numerics::Matrix3x2::identity(),
+                        opacity: 1.0,
+                        opacityBrush: std::mem::ManuallyDrop::new(None),
+                        layerOptions: D2D1_LAYER_OPTIONS1_NONE,
+                    };
+                    d2d.dc.PushLayer(&params, None);
+                    d2d.dc.DrawBitmap(bmp, Some(&r.d2()), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, Some(&src), None);
+                    d2d.dc.PopLayer();
+                    std::mem::ManuallyDrop::into_inner(params.geometricMask);
+                }
+                if hov && !selected {
+                    ui.text(d2d, r, "Image", 11.0, W_SEMI, rgba(0xffffff, 0.95), Align::Center);
+                }
+            },
+            None => {
+                ui.fill(d2d, r, ui.px(8.0), rgba(if hov { HOVER } else { PANEL2 }, 1.0));
+                ui.stroke(d2d, r, ui.px(8.0), rgba(BORDER, 1.0), 1.0);
+                ui.text(d2d, r, "+ Image", 12.0, W_SEMI, rgba(if hov { TEXT } else { MUTED }, 1.0), Align::Center);
+            }
+        }
+        if selected {
+            ui.stroke(d2d, r.inset(-ui.px(3.0)), ui.px(10.0), rgba(0xffffff, 0.95), ui.px(2.0));
+        }
+        let mut pick = false;
+        if clicked {
+            if st.bg_image.is_empty() {
+                pick = true;
+            } else if !selected {
+                ui.edit_started = true;
+                st.background = n;
+            }
+        }
+        y += ((n + 1).div_ceil(cols)) as f32 * (sh + gap);
+        if selected {
+            ui.slider(d2d, id("bgblur"), row(&mut y, ui.px(40.0)), "Image blur", &mut st.bg_blur, 0.0, 1.0, &|v| {
+                if v < 0.01 { "Off".to_string() } else { format!("{:.0}%", v * 100.0) }
+            });
+            y += gap * 0.5;
+            let r = row(&mut y, ui.px(32.0));
+            if ui.button(d2d, id("bgchange"), r, if self.picker.is_some() { "Choosing…" } else { "Change image…" }, ButtonKind::Secondary) {
+                pick = true;
+            }
+        }
+        if pick && self.picker.is_none() {
+            self.want_picker = true;
+        }
+        y += ui.px(8.0);
 
         ui.section(d2d, row(&mut y, ui.px(24.0)), "Frame");
         ui.slider(d2d, id("padding"), row(&mut y, ui.px(40.0)), "Padding", &mut st.padding, 0.0, 0.2, &pct);

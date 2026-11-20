@@ -26,8 +26,10 @@ cbuffer P : register(b0) {
     float4 shape;    // radius, shadow strength, shadow blur, shadow y offset
     float4 cam;      // center x, center y, scale, blur samples
     float4 camPrev;  // previous center x, y, scale
+    float4 bgImg;    // enabled, blur mip level, uv scale x, uv scale y
 };
 Texture2D src : register(t0);
+Texture2D bgTex : register(t1);
 SamplerState smp : register(s0);
 
 struct VOut { float4 pos : SV_Position; };
@@ -52,6 +54,26 @@ float4 ps(VOut i) : SV_Target {
     float g = saturate(uvc.x * 0.55 + uvc.y * 0.45);
     float3 col = lerp(bg0.rgb, bg1.rgb, g);
     col += 0.05 * saturate(1 - length(uvc - float2(0.25, 0.15)) * 1.4);
+    if (bgImg.x > 0) {
+        // Image background, "cover" fit. Blur = sampling a smaller mip with a
+        // small disc of taps so it stays smooth instead of blocky.
+        float2 buv = 0.5 + (uvc - 0.5) * bgImg.zw;
+        float lod = bgImg.y;
+        if (lod < 0.01) {
+            col = bgTex.SampleLevel(smp, buv, 0).rgb;
+        } else {
+            uint bw, bh, levels;
+            bgTex.GetDimensions(0, bw, bh, levels);
+            float2 texel = exp2(lod) / float2(bw, bh);
+            static const float2 taps[12] = {
+                float2(1, 0), float2(-1, 0), float2(0, 1), float2(0, -1),
+                float2(0.7, 0.7), float2(-0.7, 0.7), float2(0.7, -0.7), float2(-0.7, -0.7),
+                float2(2, 0.5), float2(-2, -0.5), float2(0.5, -2), float2(-0.5, 2) };
+            float3 acc = bgTex.SampleLevel(smp, buv, lod).rgb;
+            [unroll] for (int t = 0; t < 12; t++) acc += bgTex.SampleLevel(smp, buv + taps[t] * texel, lod).rgb;
+            col = acc / 13;
+        }
+    }
 
     float2 hb = rect.zw * 0.5;
     float2 c = rect.xy + hb;
@@ -102,6 +124,7 @@ struct Constants {
     shape: [f32; 4],
     cam: [f32; 4],
     cam_prev: [f32; 4],
+    bg_img: [f32; 4],
 }
 
 fn compile(entry: &str, target: &str) -> Res<Vec<u8>> {
@@ -203,6 +226,9 @@ pub struct Compositor {
     pub height: u32,
     shapes: CursorShapes,
     key_font: Option<(f32, IDWriteTextFormat)>,
+    /// Loaded background image: (path, view, width, height).
+    bg: Option<(std::path::PathBuf, ID3D11ShaderResourceView, u32, u32)>,
+    bg_failed: Option<std::path::PathBuf>,
 }
 
 impl Compositor {
@@ -246,6 +272,8 @@ impl Compositor {
                 height,
                 shapes: cursor_shapes(d2d)?,
                 key_font: None,
+                bg: None,
+                bg_failed: None,
             })
         }
     }
@@ -271,6 +299,43 @@ impl Compositor {
         Ok(())
     }
 
+    /// Loads (or drops) the background image the style asks for. Returns false if it
+    /// is wanted but couldn't be loaded (the gradient is used instead).
+    fn ensure_background(&mut self, p: &Project) -> bool {
+        let Some(want) = p.background_image() else {
+            self.bg = None;
+            return true;
+        };
+        if self.bg.as_ref().is_some_and(|b| b.0 == want) {
+            return true;
+        }
+        if self.bg_failed.as_ref() == Some(&want) {
+            return false;
+        }
+        let loaded = (|| -> Res<_> {
+            let img = crate::image::load(&want, 3840, false)?;
+            let tex = self.gpu.texture(img.width, img.height, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET, true)?;
+            let srv = self.gpu.srv(&tex)?;
+            unsafe {
+                self.gpu.ctx.UpdateSubresource(&tex, 0, None, img.pixels.as_ptr() as _, img.width * 4, 0);
+                self.gpu.ctx.GenerateMips(&srv);
+            }
+            Ok((srv, img.width, img.height))
+        })();
+        match loaded {
+            Ok((srv, w, h)) => {
+                self.bg = Some((want, srv, w, h));
+                true
+            }
+            Err(e) => {
+                crate::log!("background image {}: {e}", want.display());
+                self.bg = None;
+                self.bg_failed = Some(want);
+                false
+            }
+        }
+    }
+
     /// Renders output frame for time `t` (seconds, recording time) into `self.out`.
     pub fn render(&mut self, d2d: &D2d, src: Option<&ID3D11ShaderResourceView>, p: &Project, motion: &Motion, t: f64, fps: f64) -> Res<()> {
         let (cw, ch) = (self.width as f32, self.height as f32);
@@ -278,7 +343,20 @@ impl Compositor {
         let fr = motion.at(&p.rec, t);
         // Shutter of ~1/3 frame: enough to smooth fast zooms without smearing text.
         let prev = motion.at(&p.rec, (t - 0.33 / fps).max(0.0));
-        let (b0, b1) = (BACKGROUNDS[p.style.background].1, BACKGROUNDS[p.style.background].2);
+        let preset = BACKGROUNDS[p.style.background.min(BACKGROUNDS.len() - 1)];
+        let (b0, b1) = (preset.1, preset.2);
+        let has_img = self.ensure_background(p) && self.bg.is_some();
+        let bg_img = match (&self.bg, has_img) {
+            (Some((_, _, iw, ih)), true) => {
+                let (ca, ia) = (cw / ch, *iw as f32 / *ih as f32);
+                let (sx, sy) = if ia > ca { (ca / ia, 1.0) } else { (1.0, ia / ca) };
+                // Blur strength in mip levels, relative to the output size so it looks the same at any resolution.
+                let base = ((*iw as f32 / cw).max(*ih as f32 / ch)).max(1.0).log2();
+                let lod = if p.style.bg_blur > 0.01 { base + p.style.bg_blur * 5.5 } else { 0.0 };
+                [1.0, lod, sx, sy]
+            }
+            _ => [0.0; 4],
+        };
         let col = |h: u32| [((h >> 16) & 255) as f32 / 255.0, ((h >> 8) & 255) as f32 / 255.0, (h & 255) as f32 / 255.0, 1.0];
         let blur_samples = if p.style.motion_blur && fr.cam_speed > 0.15 { 8.0 } else { 1.0 };
         let k = Constants {
@@ -289,6 +367,7 @@ impl Compositor {
             shape: [lay.radius, if p.style.padding > 0.001 { p.style.shadow } else { 0.0 }, 0.035 * cw.min(ch) + 1.0, 0.01 * ch],
             cam: [fr.cam_x, fr.cam_y, fr.cam_scale, blur_samples],
             cam_prev: [prev.cam_x, prev.cam_y, prev.cam_scale, 0.0],
+            bg_img,
         };
         unsafe {
             let ctx = &self.gpu.ctx;
@@ -302,9 +381,10 @@ impl Compositor {
             ctx.PSSetShader(&self.ps, None);
             ctx.PSSetConstantBuffers(0, Some(&[Some(self.cb.clone())]));
             ctx.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
-            ctx.PSSetShaderResources(0, Some(&[src.cloned()]));
+            let bg_view = if has_img { self.bg.as_ref().map(|b| b.1.clone()) } else { None };
+            ctx.PSSetShaderResources(0, Some(&[src.cloned(), bg_view]));
             ctx.Draw(3, 0);
-            ctx.PSSetShaderResources(0, Some(&[None]));
+            ctx.PSSetShaderResources(0, Some(&[None, None]));
             ctx.OMSetRenderTargets(None, None);
         }
         self.overlays(d2d, p, &lay, &fr, t)

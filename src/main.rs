@@ -64,10 +64,23 @@ fn main() {
         println!("{:?} in {:.2}s -> {}", r, t.elapsed().as_secs_f64(), out.display());
         return;
     }
-    if args.get(1).map(String::as_str) == Some("--record") {
-        let secs: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3.0);
-        let mon = capture::monitors().into_iter().next().expect("no monitor");
-        let rec = recorder::start(recorder::RecordOptions { target: capture::Target::Display(mon), fps: 60, all_keys: false, system_audio: true, mic: false }).expect("start");
+    // --record <secs>  |  --record-window <title contains> <secs>   (scripted demos / tests)
+    if matches!(args.get(1).map(String::as_str), Some("--record") | Some("--record-window")) {
+        let window = args[1] == "--record-window";
+        let secs: f64 = args.get(if window { 3 } else { 2 }).and_then(|s| s.parse().ok()).unwrap_or(3.0);
+        let target = if window {
+            let needle = args.get(2).cloned().unwrap_or_default().to_lowercase();
+            match capture::windows().into_iter().find(|w| w.title.to_lowercase().contains(&needle)) {
+                Some(w) => capture::Target::Window(w),
+                None => {
+                    log!("no window title contains '{needle}'");
+                    std::process::exit(2);
+                }
+            }
+        } else {
+            capture::Target::Display(capture::monitors().into_iter().next().expect("no monitor"))
+        };
+        let rec = recorder::start(recorder::RecordOptions { target, fps: 60, all_keys: false, system_audio: !window, mic: false }).expect("start");
         while rec.elapsed() < secs && !rec.stop_requested() {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }

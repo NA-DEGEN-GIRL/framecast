@@ -1,93 +1,120 @@
-# Framecast
+<p align="center">
+  <img src="assets/framecast.png" width="112" alt="Framecast icon">
+</p>
 
-<img src="assets/framecast.png" width="96" alt="Framecast icon">
+<h1 align="center">Framecast</h1>
 
-웹게임·앱 소개 영상을 "그냥 화면 녹화"보다 훨씬 보기 좋게 만들어 주는 Windows용 화면 녹화기입니다.
-(FocuSee / Screen Studio 류의 기능을 Rust로 직접 구현)
+<p align="center">
+  A fast, native Windows screen recorder that turns plain captures into polished product demos —<br>
+  auto zoom on clicks, a smooth oversized cursor, beautiful backgrounds. Written in Rust.
+</p>
 
-녹화할 때는 **원본 화면 + 커서/클릭/단축키 이벤트**를 따로 저장하고, 편집기에서 나중에 스타일을 입혀 MP4로 내보냅니다.
-그래서 녹화 후에도 줌, 커서 크기, 배경 등을 자유롭게 바꿀 수 있습니다.
+<p align="center"><b>English</b> · <a href="README.ko.md">한국어</a></p>
 
-## 기능
+<p align="center">
+  <img src="docs/media/demo.gif" width="760" alt="Framecast demo: auto zoom, smooth cursor, click ripple, shortcut badge">
+  <br><sub>Made with Framecast from a 15-second recording of a (fake) web game — no manual editing besides picking a background. <a href="docs/media/demo.mp4">MP4 version</a></sub>
+</p>
 
-| 분류 | 내용 |
+## Why
+
+A raw screen recording of your web game or app looks flat: tiny cursor, no focus, the whole desktop in view.
+Framecast records the screen **and** your cursor, clicks and shortcuts separately, then re-renders them on the GPU:
+it zooms where you click, glides the camera, redraws a big crisp cursor, and frames everything on a nice background.
+Because the effects are applied after recording, you can change all of them later.
+
+<p align="center"><img src="docs/media/before-after.png" width="900" alt="Raw capture vs. Framecast output"><br><sub>Raw capture (left) vs. Framecast export (right)</sub></p>
+
+## Features
+
+| | |
 |---|---|
-| 녹화 | **전체 화면 / 특정 창 / 영역** 선택, 모니터 선택, 30/60fps, 3초 카운트다운, 시스템 소리 / 마이크 녹음, 단축키 `Ctrl+Shift+F9` 로 정지 |
-| 일시정지 | 녹화 바의 ❚❚ 버튼 또는 `Ctrl+Shift+F10` — 멈춘 구간은 영상·소리·클릭에서 모두 빠져서 이어 붙은 것처럼 재생되고, 편집기 타임라인에 노란 표시로 남음 |
-| 창·영역 선택 | 시작 시 화면이 멈춘 상태로 어둡게 표시 — 창은 마우스를 올리고 클릭, 영역은 드래그 (Shift = 16:9 고정), Esc 취소. 창 녹화는 다른 창에 가려져도 그 창만 깨끗하게 찍히고, 창을 움직여도 커서/클릭 위치가 따라감 |
-| 녹화 컨트롤 | 화면 상단의 작은 정지 바 — 녹화 영상에는 **찍히지 않음** (`WDA_EXCLUDEFROMCAPTURE`) |
-| 자동 줌 | 클릭 위치를 기준으로 줌 구간 자동 생성, 줌 중엔 커서를 부드럽게 따라감 (스프링 + 데드존) |
-| 커서 | OS 커서 대신 벡터 커서를 다시 그림 (어떤 줌에서도 선명), 크기 조절, 움직임 스무딩, 대기 시 자동 숨김, 클릭 시 눌림 효과 |
-| 클릭 효과 | Ripple / Pulse |
-| 프레임 | 그라데이션 배경 8종 또는 **내 이미지**(PNG/JPG/WebP 등, 화면 꽉 채우기 + 흐림 조절), 여백, 둥근 모서리, 그림자, 비율(원본/16:9/4:3/1:1/9:16), 해상도(720p~4K) |
-| 단축키 표시 | `Ctrl + C` 같은 단축키를 화면 하단에 배지로 표시 (기본값: 단축키만 기록, 일반 타이핑은 기록 안 함) |
-| 모션 블러 | 줌/패닝이 빠를 때만 은은하게 적용 |
-| 편집기 | 실시간 미리보기 + 오디오 재생, 타임라인(트림, **중간 구간 잘라내기**, 줌 블록 추가/이동/길이조절/삭제), 실행취소(Ctrl+Z), 자동 저장 |
-| 내보내기 | 하드웨어 H.264 + AAC **MP4**, 또는 **GIF**(480/720/960px, 10/15/20fps, 무한 반복) — 백그라운드 진행, 취소 가능 |
+| **Record** | Full screen, a single **window** (even when covered by other windows), or a dragged **area** · 30/60 fps · 3-second countdown · system audio and microphone |
+| **Controls** | Floating bar that never appears in the video · **Pause / resume** (`Ctrl+Shift+F10`) · Stop (`Ctrl+Shift+F9`) |
+| **Auto zoom** | Zoom segments generated from your clicks; the camera follows the cursor with a spring + dead zone |
+| **Cursor** | Vector cursor redrawn at any size (sharp at any zoom), motion smoothing, hide when idle, press animation |
+| **Click effects** | Ripple or pulse |
+| **Frame** | 8 gradient backgrounds or **your own image** (cover-fit, adjustable blur) · padding · rounded corners · shadow · aspect ratio (source / 16:9 / 4:3 / 1:1 / 9:16) |
+| **Shortcut badges** | Shows shortcuts like `Ctrl + C` on screen. Only shortcuts are logged by default — never plain typing |
+| **Motion blur** | Subtle, only during fast zooms/pans |
+| **Editor** | Live preview with audio, timeline with trim, **cut out sections**, zoom blocks (add / move / resize / delete), undo/redo, autosave |
+| **Export** | Hardware H.264 + AAC **MP4** (720p–4K) or **GIF** (480–960 px, 10–20 fps, loops) in the background |
 
-### 편집기 조작
+<p align="center"><img src="docs/media/editor.png" width="900" alt="Framecast editor"></p>
+<p align="center"><img src="docs/media/home.png" width="440" alt="Home screen">&nbsp;&nbsp;<img src="docs/media/recording-bar.png" width="300" alt="Recording bar (paused)"></p>
 
-- **Space** 재생/일시정지, **←/→** 한 프레임 이동
-- 줌 트랙 **더블클릭**: 줌 추가 / 블록 드래그: 이동 / 양 끝 드래그: 길이 / **Delete**: 삭제
-- 클립 양 끝 손잡이 드래그: 앞뒤 자르기 (트림)
-- **C** 또는 녹화 트랙 더블클릭 / "✂ Cut here": 재생 위치 주변 1초 잘라내기 → 빨간 블록의 양 끝을 끌어 범위 조절, Delete로 되살리기
-- **Ctrl+Z / Ctrl+Y**: 실행취소 / 다시실행
-- 사이드바 "Auto-zoom on clicks": 클릭 기록으로 줌 구간 다시 생성
+### Editor controls
 
-## 성능 (개발 PC 실측, release 빌드)
+| Action | How |
+|---|---|
+| Play / pause | `Space` or click the preview |
+| Step one frame | `←` / `→` |
+| Add a zoom | Double-click the zoom track (or "Auto-zoom on clicks") |
+| Cut out a section | `C`, double-click the recording track, or "✂ Cut here" — then drag the red block's edges |
+| Trim start/end | Drag the handles at the ends of the recording track |
+| Delete selected zoom/cut | `Delete` |
+| Undo / redo | `Ctrl+Z` / `Ctrl+Y` |
 
-- 4K 60fps 녹화: 프레임 드랍 0 (601/601), CPU 전체의 약 1%, RAM ~100MB
-- 10초 4K 원본 → 1080p60 내보내기: 약 4초
+## Performance
 
-캡처(Windows.Graphics.Capture) → 인코딩(Media Foundation 하드웨어 H.264) → 합성(D3D11 셰이더 + Direct2D) 전 과정이
-GPU 텍스처로만 이동하고 CPU 픽셀 복사가 없어서 렉이 거의 없습니다.
+Measured on the development PC (release build):
 
-## 빌드 / 실행
+- **4K 60 fps recording:** 0 dropped frames (601/601), ~1% total CPU, ~100 MB RAM
+- **Export:** 10 s of 4K source → 1080p60 MP4 in ~4 s
 
-요구사항: Windows 10 2004+ (Windows 11 권장), Rust (MSVC 툴체인)
+Every frame stays on the GPU: Windows.Graphics.Capture → Direct3D 11 → Media Foundation hardware encoder,
+and back through the hardware decoder → HLSL compositor + Direct2D overlays → encoder. No CPU pixel copies
+(except for GIF, which has to be quantized on the CPU).
+
+## Build
+
+Requirements: Windows 10 2004+ (Windows 11 recommended) and Rust with the MSVC toolchain.
 
 ```bash
 cargo build --release --locked
 ```
 
-결과물: `target/release/framecast.exe` (단일 실행 파일, ~0.7MB, 런타임 설치 불필요)
+Output: `target/release/framecast.exe` — a single ~0.9 MB executable, nothing to install.
 
-녹화 파일 위치: `%USERPROFILE%\Videos\Framecast\<날짜_시간>\`
-(`raw.mp4`, `events.json`, `project.json`, `system.wav`, `mic.wav`) — 내보낸 영상은 `Videos\Framecast\Exports\`
+Recordings are stored in `%USERPROFILE%\Videos\Framecast\<date_time>\`
+(`raw.mp4`, `events.json`, `project.json`, `system.wav`, `mic.wav`); exports go to `Videos\Framecast\Exports\`.
 
-## 의존성 / 보안 정책
+## Dependencies & security
 
-외부 라이브러리는 **Microsoft 공식 `windows` 크레이트 하나**만 사용하며, 정확한 버전(`=0.62.2`)으로 고정하고
-`Cargo.lock`을 커밋합니다. 그 외(JSON, WAV, UI 위젯, 셰이더 등)는 모두 직접 구현했습니다. 자세한 내용은 [SECURITY.md](SECURITY.md).
+The only dependency is Microsoft's official [`windows`](https://github.com/microsoft/windows-rs) crate, pinned to an
+exact version (`=0.62.2`) with `Cargo.lock` committed; builds use `--locked`. Everything else — JSON, WAV, the GIF
+encoder, the UI toolkit, the icon/resource embedding — is implemented in this repository. See [SECURITY.md](SECURITY.md).
 
-## 구조
+Nothing ever leaves your machine: no network access, no telemetry.
 
-| 파일 | 역할 |
+## Project layout
+
+| File | Purpose |
 |---|---|
-| `src/capture.rs` | Windows.Graphics.Capture 캡처 (모니터 / 창 / 영역 크롭), 창 목록 |
-| `src/selector.rs` | 창·영역 선택 오버레이 |
-| `src/media.rs` | Media Foundation 하드웨어 인코더/디코더 (GPU 텍스처 입출력) |
-| `src/audio.rs` | WASAPI 시스템 소리(loopback)/마이크 캡처, 믹싱, 미리듣기 |
-| `src/input.rs` | 저수준 마우스/키보드 훅, 커서 모양 샘플링, 정지 단축키 |
-| `src/recorder.rs` | 녹화 스레드 (고정 fps 샘플링 + 이벤트 로그) |
-| `src/project.rs` | 프로젝트 데이터, 자동 줌, 스프링 기반 카메라/커서 움직임 계산 |
-| `src/render.rs` | 합성기: HLSL 셰이더(배경/그림자/둥근 프레임/줌/모션블러) + Direct2D(커서/클릭/단축키) |
-| `src/export.rs` | 내보내기 스레드 (MP4 / GIF) |
-| `src/gif.rs` | 자체 GIF 인코더 (변경 영역만 저장, 프레임별 팔레트, LZW) |
-| `src/icon.rs`, `build.rs` | 앱 아이콘 생성(`--make-icon`) 및 exe에 아이콘 리소스 삽입 (빌드 의존성 없음) |
-| `src/ui.rs`, `src/window.rs`, `src/app.rs` | Direct2D 기반 자체 UI (홈, 녹화 바, 편집기) |
-| `src/image.rs` | 이미지 불러오기(WIC), 파일 선택 창 |
-| `src/json.rs` | 최소 JSON 파서/작성기 |
+| `src/capture.rs` | Windows.Graphics.Capture: display / window / cropped area, window list |
+| `src/selector.rs` | Full-screen picker for windows and areas |
+| `src/media.rs` | Media Foundation hardware encoder / decoder (GPU textures in and out) |
+| `src/audio.rs` | WASAPI loopback + mic capture, mixing, preview playback |
+| `src/input.rs` | Low-level mouse/keyboard hooks, cursor shapes, hotkeys |
+| `src/clock.rs` | Pause-aware recording clock shared by video, input and audio |
+| `src/recorder.rs` | Recording thread (fixed-rate sampling + event log) |
+| `src/project.rs` | Project data, auto zoom, spring-based camera/cursor motion, edit timeline |
+| `src/render.rs` | Compositor: HLSL (background, shadow, rounded frame, zoom, motion blur) + Direct2D (cursor, clicks, badges) |
+| `src/export.rs`, `src/gif.rs` | Export threads; in-house GIF encoder (changed-rect frames, per-frame palettes, LZW) |
+| `src/ui.rs`, `src/window.rs`, `src/app.rs` | Immediate-mode Direct2D UI (home, recording bar, editor) |
+| `src/image.rs` | Image loading (WIC) and the file dialog |
+| `src/icon.rs`, `build.rs` | App icon drawn with Direct2D, embedded without build dependencies |
+| `docs/demo/nebula-drift.html` | The fake game used to record the demo media |
 
-## 디버그용
+### Developer flags
 
-- `framecast.exe --record <초>`: UI 없이 주 모니터 녹화
-- `framecast.exe --export <프로젝트 폴더>`: 해당 프로젝트를 `export_test.mp4`로 내보내기
-- `framecast.exe --open <프로젝트 폴더>`: 편집기로 바로 열기
-- `framecast.exe --make-icon assets/framecast.ico`: 아이콘 다시 그리기 (`src/icon.rs` 수정 후)
-- 환경변수 `FRAMECAST_SHOW_CONTROLS_IN_CAPTURE=1`: 녹화 바가 캡처에 보이게 (스크린샷 테스트용)
-- 로그: `Videos\Framecast\framecast.log`
+`--record <secs>` · `--record-window <title> <secs>` · `--export <project dir>` · `--open <project dir>` · `--make-icon <out.ico>`
+· env `FRAMECAST_SHOW_CONTROLS_IN_CAPTURE=1` (lets screenshots include the recording bar) · log at `Videos\Framecast\framecast.log`
 
-## 아직 없는 것 (다음 후보)
+## Roadmap
 
-- 웹캠 오버레이
+- Webcam overlay
+
+## License
+
+[MIT](LICENSE). Framecast is an independent project, inspired by tools like Screen Studio and FocuSee, and not affiliated with them.

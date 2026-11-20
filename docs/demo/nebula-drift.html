@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Nebula Drift</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  A made-up web game screen used only to record Framecast's demo media.
+  It plays a fixed script on its own (no real input needed), so the recording
+  is reproducible and contains nothing personal.
+-->
+<style>
+  :root {
+    --bg: #0b0d1a; --panel: #141833; --panel2: #1c2148; --line: #2a3066;
+    --text: #e8ecff; --muted: #8e96c8; --accent: #7c5cff; --accent2: #22d3ee; --gold: #ffcc4d; --good: #3ddc97;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 15px/1.4 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; overflow: hidden; }
+  header { height: 64px; display: flex; align-items: center; gap: 28px; padding: 0 28px;
+    background: linear-gradient(90deg, #12163a, #1a1240); border-bottom: 1px solid var(--line); }
+  .logo { font-weight: 800; letter-spacing: .12em; font-size: 18px; display: flex; gap: 10px; align-items: center; }
+  .logo i { width: 22px; height: 22px; border-radius: 6px; background: linear-gradient(135deg, var(--accent), #ff5f8f); display: inline-block; transform: rotate(45deg) scale(.8); }
+  nav { display: flex; gap: 6px; }
+  nav a { padding: 9px 16px; border-radius: 10px; color: var(--muted); text-decoration: none; font-weight: 600; transition: .2s; }
+  nav a.on { background: var(--panel2); color: var(--text); }
+  .spacer { flex: 1; }
+  .coins { font-weight: 700; color: var(--gold); padding: 8px 14px; border-radius: 10px; background: #2a2510; transition: transform .25s; }
+  .coins.bump { transform: scale(1.15); }
+  .pilot { display: flex; align-items: center; gap: 10px; color: var(--muted); font-weight: 600; }
+  .pilot b { width: 34px; height: 34px; border-radius: 50%; background: linear-gradient(135deg, #22d3ee, #7c5cff); display: inline-block; }
+  main { display: grid; grid-template-columns: 1fr 360px; gap: 22px; padding: 22px 28px; height: calc(100% - 64px); }
+  .stage { position: relative; border-radius: 18px; overflow: hidden; background: #05060f; border: 1px solid var(--line); }
+  canvas { width: 100%; height: 100%; display: block; }
+  .hud { position: absolute; top: 16px; left: 20px; right: 20px; display: flex; justify-content: space-between; font-weight: 700; letter-spacing: .04em; }
+  .hud span { background: rgba(10,12,30,.7); padding: 6px 12px; border-radius: 10px; }
+  .overlay { position: absolute; inset: 0; display: grid; place-items: center; background: radial-gradient(circle at 50% 45%, rgba(124,92,255,.25), rgba(5,6,15,.85)); transition: opacity .5s; }
+  .overlay h1 { margin: 0 0 6px; font-size: 54px; letter-spacing: .14em; text-align: center; }
+  .overlay p { margin: 0 0 26px; color: var(--muted); text-align: center; }
+  .btn { display: inline-block; padding: 14px 34px; border-radius: 14px; background: linear-gradient(135deg, var(--accent), #a855f7); color: #fff; font-weight: 800; font-size: 18px; letter-spacing: .08em; box-shadow: 0 10px 30px rgba(124,92,255,.45); transition: transform .15s; }
+  .btn.press { transform: scale(.94); }
+  .overlay .center { text-align: center; }
+  aside { display: flex; flex-direction: column; gap: 14px; }
+  aside h2 { margin: 4px 0 2px; font-size: 14px; letter-spacing: .14em; color: var(--muted); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 16px; transition: border-color .3s, box-shadow .3s; }
+  .card.hot { border-color: var(--good); box-shadow: 0 0 0 3px rgba(61,220,151,.18); }
+  .card .row { display: flex; align-items: center; gap: 12px; }
+  .ship { width: 46px; height: 46px; border-radius: 12px; display: grid; place-items: center; font-size: 22px; background: var(--panel2); }
+  .card .name { font-weight: 700; }
+  .card .sub { color: var(--muted); font-size: 13px; }
+  .bar { height: 7px; border-radius: 4px; background: #232856; margin-top: 10px; overflow: hidden; }
+  .bar i { display: block; height: 100%; border-radius: 4px; background: linear-gradient(90deg, var(--accent2), var(--accent)); transition: width .8s; }
+  .up { margin-left: auto; padding: 8px 14px; border-radius: 10px; background: var(--panel2); font-weight: 700; color: var(--gold); transition: .2s; }
+  .up.press { transform: scale(.92); background: #2c335f; }
+  .toast { position: absolute; left: 50%; bottom: 26px; transform: translate(-50%, 20px); opacity: 0; background: #12301f; color: var(--good); border: 1px solid #1f6b45; padding: 12px 20px; border-radius: 12px; font-weight: 700; transition: .35s; }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .debug { position: absolute; left: 20px; bottom: 20px; font: 12px/1.5 Consolas, monospace; color: #9ef7c7; background: rgba(0,0,0,.6); padding: 10px 12px; border-radius: 8px; opacity: 0; transition: opacity .3s; }
+  .debug.show { opacity: 1; }
+  .modal { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(5,6,15,.6); opacity: 0; pointer-events: none; transition: .35s; }
+  .modal.show { opacity: 1; }
+  .modal .box { width: 420px; background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 22px; transform: translateY(14px); transition: .35s; }
+  .modal.show .box { transform: none; }
+  .modal h3 { margin: 0 0 12px; letter-spacing: .1em; }
+  .lb { display: flex; justify-content: space-between; padding: 9px 4px; border-bottom: 1px solid var(--line); }
+  .lb:last-child { border: 0; }
+  .lb.me { color: var(--gold); font-weight: 700; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"><i></i>NEBULA DRIFT</div>
+  <nav><a class="on" id="tab-play">Play</a><a id="tab-hangar">Hangar</a><a id="tab-lb">Leaderboard</a><a>Settings</a></nav>
+  <div class="spacer"></div>
+  <div class="coins" id="coins">◎ 1,250</div>
+  <div class="pilot"><b></b>Pilot_42</div>
+</header>
+<main>
+  <section class="stage" id="stage">
+    <canvas id="c"></canvas>
+    <div class="hud"><span id="score">SCORE 0</span><span>WAVE 1</span><span>♥ ♥ ♥</span></div>
+    <div class="overlay" id="overlay"><div class="center"><h1>NEBULA DRIFT</h1><p>Dodge the asteroids. Collect the stars.</p><span class="btn" id="play">▶ PLAY</span></div></div>
+    <div class="debug" id="debug">fps 60.0<br>entities 48<br>draw 1.9 ms</div>
+    <div class="toast" id="toast">✓ Thrusters upgraded to level 3</div>
+    <div class="modal" id="modal"><div class="box"><h3>LEADERBOARD</h3>
+      <div class="lb"><span>1. Comet_Kid</span><span>98,420</span></div>
+      <div class="lb"><span>2. Vega</span><span>91,300</span></div>
+      <div class="lb"><span>3. Orbit.Rx</span><span>88,015</span></div>
+      <div class="lb me"><span>7. Pilot_42</span><span id="mine">12,880</span></div>
+    </div></div>
+  </section>
+  <aside>
+    <h2>HANGAR</h2>
+    <div class="card"><div class="row"><div class="ship">🛸</div><div><div class="name">Sparrow</div><div class="sub">Agile scout</div></div><span class="up">◎ 200</span></div><div class="bar"><i style="width:45%"></i></div></div>
+    <div class="card" id="card2"><div class="row"><div class="ship">🚀</div><div><div class="name">Thrusters</div><div class="sub">Speed boost · Lv 2</div></div><span class="up" id="up2">◎ 350</span></div><div class="bar"><i id="bar2" style="width:40%"></i></div></div>
+    <div class="card"><div class="row"><div class="ship">🛡️</div><div><div class="name">Shield Core</div><div class="sub">Absorbs 2 hits</div></div><span class="up">◎ 500</span></div><div class="bar"><i style="width:25%"></i></div></div>
+    <div class="card"><div class="row"><div class="ship">✨</div><div><div class="name">Star Magnet</div><div class="sub">Pulls nearby stars</div></div><span class="up">◎ 650</span></div><div class="bar"><i style="width:15%"></i></div></div>
+  </aside>
+</main>
+<script>
+const c = document.getElementById('c'), g = c.getContext('2d');
+let W = 0, H = 0, playing = false, score = 0;
+function fit() { const r = c.getBoundingClientRect(); W = c.width = r.width * devicePixelRatio; H = c.height = r.height * devicePixelRatio; }
+addEventListener('resize', fit); fit();
+// Deterministic pseudo-random so every run looks the same.
+let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+const stars = Array.from({ length: 220 }, () => ({ x: rnd(), y: rnd(), z: 0.2 + rnd() * 0.8 }));
+const rocks = Array.from({ length: 9 }, () => ({ x: rnd(), y: rnd(), r: 0.02 + rnd() * 0.035, v: 0.05 + rnd() * 0.08, a: rnd() * 6 }));
+let shipY = 0.5, last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  g.fillStyle = '#05060f'; g.fillRect(0, 0, W, H);
+  const speed = playing ? 0.25 : 0.05;
+  for (const s of stars) {
+    s.x -= dt * speed * s.z; if (s.x < 0) s.x += 1;
+    g.fillStyle = `rgba(200,210,255,${0.3 + s.z * 0.7})`;
+    g.fillRect(s.x * W, s.y * H, 2 * s.z * devicePixelRatio, 2 * s.z * devicePixelRatio);
+  }
+  const nebula = g.createRadialGradient(W * 0.7, H * 0.35, 0, W * 0.7, H * 0.35, W * 0.5);
+  nebula.addColorStop(0, 'rgba(124,92,255,0.22)'); nebula.addColorStop(1, 'rgba(124,92,255,0)');
+  g.fillStyle = nebula; g.fillRect(0, 0, W, H);
+  if (playing) {
+    for (const r of rocks) {
+      r.x -= dt * r.v; r.a += dt; if (r.x < -0.1) { r.x = 1.1; r.y = 0.1 + rnd() * 0.8; }
+      g.save(); g.translate(r.x * W, r.y * H); g.rotate(r.a);
+      g.fillStyle = '#6b6f8f'; g.beginPath();
+      for (let k = 0; k < 7; k++) { const ang = k / 7 * Math.PI * 2, rr = r.r * W * (0.8 + 0.2 * Math.sin(k * 3)); g.lineTo(Math.cos(ang) * rr, Math.sin(ang) * rr); }
+      g.closePath(); g.fill(); g.restore();
+    }
+    shipY = 0.5 + Math.sin(now / 700) * 0.18;
+    score += Math.round(dt * 420); document.getElementById('score').textContent = 'SCORE ' + score.toLocaleString();
+  }
+  // Ship
+  g.save(); g.translate(W * 0.18, shipY * H);
+  g.fillStyle = '#22d3ee'; g.beginPath(); g.moveTo(34 * devicePixelRatio, 0); g.lineTo(-18 * devicePixelRatio, -16 * devicePixelRatio); g.lineTo(-8 * devicePixelRatio, 0); g.lineTo(-18 * devicePixelRatio, 16 * devicePixelRatio); g.closePath(); g.fill();
+  if (playing) { g.fillStyle = 'rgba(255,170,60,0.9)'; g.beginPath(); g.ellipse(-16 * devicePixelRatio, 0, (10 + Math.random() * 8) * devicePixelRatio, 5 * devicePixelRatio, 0, 0, 7); g.fill(); }
+  g.restore();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// The scripted "session" (seconds after the page loads).
+const $ = id => document.getElementById(id);
+const at = (s, f) => setTimeout(f, s * 1000);
+const T0 = 3.0;
+at(T0 + 0.0, () => $('play').classList.add('press'));
+at(T0 + 0.15, () => { $('play').classList.remove('press'); $('overlay').style.opacity = 0; playing = true; });
+at(T0 + 3.4, () => $('up2').classList.add('press'));
+at(T0 + 3.55, () => {
+  $('up2').classList.remove('press'); $('card2').classList.add('hot'); $('bar2').style.width = '70%';
+  $('coins').textContent = '◎ 900'; $('coins').classList.add('bump'); $('toast').classList.add('show');
+});
+at(T0 + 3.9, () => $('coins').classList.remove('bump'));
+at(T0 + 5.6, () => { $('toast').classList.remove('show'); $('card2').classList.remove('hot'); });
+at(T0 + 6.2, () => $('debug').classList.add('show'));
+at(T0 + 8.4, () => { $('tab-play').classList.remove('on'); $('tab-lb').classList.add('on'); $('modal').classList.add('show'); });
+</script>
+</body>
+</html>

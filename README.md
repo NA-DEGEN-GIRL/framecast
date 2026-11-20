@@ -1,5 +1,7 @@
 # Framecast
 
+<img src="assets/framecast.png" width="96" alt="Framecast icon">
+
 웹게임·앱 소개 영상을 "그냥 화면 녹화"보다 훨씬 보기 좋게 만들어 주는 Windows용 화면 녹화기입니다.
 (FocuSee / Screen Studio 류의 기능을 Rust로 직접 구현)
 
@@ -21,7 +23,7 @@
 | 단축키 표시 | `Ctrl + C` 같은 단축키를 화면 하단에 배지로 표시 (기본값: 단축키만 기록, 일반 타이핑은 기록 안 함) |
 | 모션 블러 | 줌/패닝이 빠를 때만 은은하게 적용 |
 | 편집기 | 실시간 미리보기 + 오디오 재생, 타임라인(트림, 줌 블록 추가/이동/길이조절/삭제), 실행취소(Ctrl+Z), 자동 저장 |
-| 내보내기 | 하드웨어 H.264 + AAC MP4, 백그라운드 진행 (취소 가능) |
+| 내보내기 | 하드웨어 H.264 + AAC **MP4**, 또는 **GIF**(480/720/960px, 10/15/20fps, 무한 반복) — 백그라운드 진행, 취소 가능 |
 
 ### 편집기 조작
 
@@ -69,7 +71,9 @@ cargo build --release --locked
 | `src/recorder.rs` | 녹화 스레드 (고정 fps 샘플링 + 이벤트 로그) |
 | `src/project.rs` | 프로젝트 데이터, 자동 줌, 스프링 기반 카메라/커서 움직임 계산 |
 | `src/render.rs` | 합성기: HLSL 셰이더(배경/그림자/둥근 프레임/줌/모션블러) + Direct2D(커서/클릭/단축키) |
-| `src/export.rs` | 내보내기 스레드 |
+| `src/export.rs` | 내보내기 스레드 (MP4 / GIF) |
+| `src/gif.rs` | 자체 GIF 인코더 (변경 영역만 저장, 프레임별 팔레트, LZW) |
+| `src/icon.rs`, `build.rs` | 앱 아이콘 생성(`--make-icon`) 및 exe에 아이콘 리소스 삽입 (빌드 의존성 없음) |
 | `src/ui.rs`, `src/window.rs`, `src/app.rs` | Direct2D 기반 자체 UI (홈, 녹화 바, 편집기) |
 | `src/json.rs` | 최소 JSON 파서/작성기 |
 
@@ -78,10 +82,11 @@ cargo build --release --locked
 - `framecast.exe --record <초>`: UI 없이 주 모니터 녹화
 - `framecast.exe --export <프로젝트 폴더>`: 해당 프로젝트를 `export_test.mp4`로 내보내기
 - `framecast.exe --open <프로젝트 폴더>`: 편집기로 바로 열기
+- `framecast.exe --make-icon assets/framecast.ico`: 아이콘 다시 그리기 (`src/icon.rs` 수정 후)
 - 환경변수 `FRAMECAST_SHOW_CONTROLS_IN_CAPTURE=1`: 녹화 바가 캡처에 보이게 (스크린샷 테스트용)
 - 로그: `Videos\Framecast\framecast.log`
 
 ## 아직 없는 것 (다음 후보)
 
 - 웹캠 오버레이
-- GIF 내보내기, 배경 이미지 지정
+- 배경 이미지 지정

@@ -8,7 +8,9 @@ mod capture;
 mod clock;
 mod d2d;
 mod export;
+mod gif;
 mod gpu;
+mod icon;
 mod input;
 mod json;
 mod media;
@@ -40,12 +42,24 @@ fn main() {
         std::process::exit(1);
     }
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--make-icon") {
+        let out = args.get(2).map_or("assets/framecast.ico", String::as_str);
+        if let Err(e) = icon::make(std::path::Path::new(out)) {
+            log!("icon failed: {e}");
+            std::process::exit(2);
+        }
+        return;
+    }
     if args.get(1).map(String::as_str) == Some("--export") {
         let dir = std::path::PathBuf::from(args.get(2).expect("project dir"));
         let p = project::Project::open(&dir).expect("open project");
-        let out = dir.join("export_test.mp4");
+        let out = dir.join(if p.is_gif() { "export_test.gif" } else { "export_test.mp4" });
         let t = std::time::Instant::now();
-        let r = export::run(&p, &out, &Default::default(), &Default::default());
+        let r = if p.is_gif() {
+            export::run_gif(&p, &out, &Default::default(), &Default::default())
+        } else {
+            export::run(&p, &out, &Default::default(), &Default::default())
+        };
         println!("{:?} in {:.2}s -> {}", r, t.elapsed().as_secs_f64(), out.display());
         return;
     }

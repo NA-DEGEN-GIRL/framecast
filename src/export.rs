@@ -37,10 +37,11 @@ pub fn output_path(p: &Project) -> PathBuf {
     let name = p.dir.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(crate::util::stamp);
     let base = crate::util::app_dir().join("Exports");
     let _ = std::fs::create_dir_all(&base);
-    let mut out = base.join(format!("{name}.mp4"));
+    let ext = if p.is_gif() { "gif" } else { "mp4" };
+    let mut out = base.join(format!("{name}.{ext}"));
     let mut i = 2;
     while out.exists() {
-        out = base.join(format!("{name} ({i}).mp4"));
+        out = base.join(format!("{name} ({i}).{ext}"));
         i += 1;
     }
     out
@@ -54,7 +55,7 @@ pub fn start(p: Project) -> ExportJob {
     let thread = std::thread::Builder::new()
         .name("export".into())
         .spawn(move || {
-            let r = run(&p, &o, &pr, &ca);
+            let r = if p.is_gif() { run_gif(&p, &o, &pr, &ca) } else { run(&p, &o, &pr, &ca) };
             if r.is_err() {
                 let _ = std::fs::remove_file(&o);
             }
@@ -100,4 +101,58 @@ pub fn run(p: &Project, out: &std::path::Path, progress: &AtomicU32, cancel: &At
         progress.store(((i + 1) * 10000 / frames) as u32, Ordering::Relaxed);
     }
     enc.finish().ctx("finish export")
+}
+
+/// GIF export: render each frame at GIF size, read it back from the GPU, encode.
+pub fn run_gif(p: &Project, out: &std::path::Path, progress: &AtomicU32, cancel: &AtomicBool) -> Res<()> {
+    use windows::Win32::Graphics::Direct3D11::*;
+    use windows::Win32::Graphics::Dxgi::Common::*;
+
+    let gpu = Gpu::new()?;
+    let d2d = D2d::new(&gpu)?;
+    let (w, h) = p.gif_size();
+    let mut comp = Compositor::new(&gpu, &d2d, w, h)?;
+    let mut dec = Decoder::open(&gpu, &p.dir.join("raw.mp4"))?;
+    let motion = Motion::build(p);
+    let fps = crate::project::GIF_FPS[p.style.gif_fps].1;
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: w,
+        Height: h,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Usage: D3D11_USAGE_STAGING,
+        BindFlags: 0,
+        CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+        MiscFlags: 0,
+    };
+    let mut staging = None;
+    unsafe { gpu.device.CreateTexture2D(&desc, None, Some(&mut staging)) }.ctx("staging texture")?;
+    let staging = staging.ok_or("no staging texture")?;
+    let mut gif = crate::gif::GifWriter::create(out, w, h)?;
+    let (t0, t1) = (p.trim_start, p.trim_end.min(p.rec.duration));
+    let frames = ((t1 - t0) * fps as f64).floor().max(1.0) as u64;
+    let cs = |i: u64| (i * 100 + fps as u64 / 2) / fps as u64; // centiseconds, rounded
+    dec.seek(secs_to_hns(t0))?;
+    for i in 0..frames {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
+        let t = t0 + i as f64 / fps as f64;
+        dec.frame_at(&gpu, secs_to_hns(t))?;
+        comp.render(&d2d, dec.frame_srv.as_ref(), p, &motion, t, fps as f64)?;
+        unsafe {
+            gpu.ctx.CopyResource(&staging, &comp.out);
+            let mut m = D3D11_MAPPED_SUBRESOURCE::default();
+            gpu.ctx.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut m)).ctx("Map")?;
+            let pitch = m.RowPitch as usize;
+            let bytes = std::slice::from_raw_parts(m.pData as *const u8, pitch * h as usize);
+            let r = gif.add_frame(bytes, pitch, (cs(i + 1) - cs(i)) as u32);
+            gpu.ctx.Unmap(&staging, 0);
+            r?;
+        }
+        progress.store(((i + 1) * 10000 / frames) as u32, Ordering::Relaxed);
+    }
+    gif.finish()
 }

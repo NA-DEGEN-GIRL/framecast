@@ -232,7 +232,14 @@ fn register_class() {
     ONCE.call_once(|| unsafe {
         let name = wide(CLASS);
         let hinst = GetModuleHandleW(None).unwrap_or_default();
-        let icon = LoadIconW(Some(hinst.into()), PCWSTR(1 as _)).ok();
+        // Icon group 1 is embedded by build.rs; pick exact sizes so Windows doesn't blur-scale.
+        let load = |metric_x, metric_y| {
+            LoadImageW(Some(hinst.into()), PCWSTR(1 as _), IMAGE_ICON, GetSystemMetrics(metric_x), GetSystemMetrics(metric_y), LR_DEFAULTCOLOR)
+                .ok()
+                .map(|h| HICON(h.0))
+        };
+        let icon = load(SM_CXICON, SM_CYICON);
+        let icon_small = load(SM_CXSMICON, SM_CYSMICON);
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW,
@@ -240,6 +247,7 @@ fn register_class() {
             hInstance: hinst.into(),
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
             hIcon: icon.unwrap_or_default(),
+            hIconSm: icon_small.unwrap_or_default(),
             lpszClassName: PCWSTR(name.as_ptr()),
             ..Default::default()
         };

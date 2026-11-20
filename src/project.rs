@@ -149,6 +149,10 @@ pub const BACKGROUNDS: &[(&str, u32, u32)] = &[
 pub const ASPECTS: &[(&str, f32)] = &[("Source", 0.0), ("16:9", 16.0 / 9.0), ("4:3", 4.0 / 3.0), ("1:1", 1.0), ("9:16", 9.0 / 16.0)];
 pub const RESOLUTIONS: &[(&str, u32)] = &[("720p", 720), ("1080p", 1080), ("1440p", 1440), ("4K", 2160)];
 pub const CLICK_EFFECTS: &[&str] = &["None", "Ripple", "Spotlight"];
+pub const FORMATS: &[&str] = &["MP4 video", "GIF"];
+/// GIF long-side size in pixels.
+pub const GIF_SIZES: &[(&str, u32)] = &[("480px", 480), ("720px", 720), ("960px", 960)];
+pub const GIF_FPS: &[(&str, u32)] = &[("10 fps", 10), ("15 fps", 15), ("20 fps", 20)];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Style {
@@ -165,6 +169,9 @@ pub struct Style {
     pub show_keys: bool,
     pub zoom_speed: f32, // 0 slow .. 1 fast
     pub motion_blur: bool,
+    pub format: usize,   // index into FORMATS
+    pub gif_size: usize, // index into GIF_SIZES
+    pub gif_fps: usize,  // index into GIF_FPS
     pub sys_volume: f32,
     pub mic_volume: f32,
 }
@@ -185,6 +192,9 @@ impl Default for Style {
             show_keys: true,
             zoom_speed: 0.5,
             motion_blur: true,
+            format: 0,
+            gif_size: 1,
+            gif_fps: 1,
             sys_volume: 1.0,
             mic_volume: 1.0,
         }
@@ -244,6 +254,9 @@ impl Project {
                 show_keys: s.bool_or("show_keys", d.show_keys),
                 zoom_speed: s.f32_or("zoom_speed", d.zoom_speed).clamp(0.0, 1.0),
                 motion_blur: s.bool_or("motion_blur", d.motion_blur),
+                format: idx("format", d.format, FORMATS.len()),
+                gif_size: idx("gif_size", d.gif_size, GIF_SIZES.len()),
+                gif_fps: idx("gif_fps", d.gif_fps, GIF_FPS.len()),
                 sys_volume: s.f32_or("sys_volume", d.sys_volume).clamp(0.0, 2.0),
                 mic_volume: s.f32_or("mic_volume", d.mic_volume).clamp(0.0, 2.0),
             };
@@ -278,6 +291,9 @@ impl Project {
             .set("show_keys", s.show_keys)
             .set("zoom_speed", s.zoom_speed)
             .set("motion_blur", s.motion_blur)
+            .set("format", s.format as u32)
+            .set("gif_size", s.gif_size as u32)
+            .set("gif_fps", s.gif_fps as u32)
             .set("sys_volume", s.sys_volume)
             .set("mic_volume", s.mic_volume);
         let zooms = self
@@ -310,6 +326,19 @@ impl Project {
         let (w, h) = if aspect >= 1.0 { (target_h * aspect, target_h) } else { (target_h, target_h / aspect) };
         let even = |v: f32| ((v.round() as u32) + 1) & !1;
         (even(w), even(h))
+    }
+
+    /// GIF canvas: same shape as the video canvas, long side = chosen GIF size.
+    pub fn gif_size(&self) -> (u32, u32) {
+        let (w, h) = self.canvas_size();
+        let long = GIF_SIZES[self.style.gif_size].1 as f32;
+        let k = long / w.max(h) as f32;
+        let even = |v: f32| ((v.round() as u32) + 1) & !1;
+        (even(w as f32 * k), even(h as f32 * k))
+    }
+
+    pub fn is_gif(&self) -> bool {
+        self.style.format == 1
     }
 }
 

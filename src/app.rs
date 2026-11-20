@@ -18,7 +18,7 @@ use crate::gpu::Gpu;
 use crate::input::{PAUSE_HOTKEY_LABEL, STOP_HOTKEY_LABEL};
 use crate::log;
 use crate::media::Decoder;
-use crate::project::{self, ASPECTS, BACKGROUNDS, CLICK_EFFECTS, Motion, Project, RESOLUTIONS, Style, ZoomSeg};
+use crate::project::{self, ASPECTS, BACKGROUNDS, CLICK_EFFECTS, FORMATS, GIF_FPS, GIF_SIZES, Motion, Project, RESOLUTIONS, Style, ZoomSeg};
 use crate::recorder::{self, ActiveRecording, RecordOptions};
 use crate::render::Compositor;
 use crate::selector::{self, Outcome, Selector};
@@ -865,7 +865,8 @@ impl Editor {
             ui.text(d2d, label, &format!("Exporting {:.0}%", f * 100.0), 12.5, W_SEMI, rgba(TEXT, 1.0), Align::Right);
             return;
         }
-        if ui.button(d2d, id("export"), btn, "Export MP4", ButtonKind::Primary) {
+        let label = if self.p.is_gif() { "Export GIF" } else { "Export MP4" };
+        if ui.button(d2d, id("export"), btn, label, ButtonKind::Primary) {
             let _ = self.p.save();
             self.playing = false;
             self.export_result = None;
@@ -939,6 +940,23 @@ impl Editor {
         let pct = |v: f32| format!("{:.0}%", v * 100.0);
 
         y += ui.px(10.0);
+        ui.section(d2d, row(&mut y, ui.px(24.0)), "Export");
+        ui.segmented(d2d, id("format"), row(&mut y, ui.px(32.0)), FORMATS, &mut st.format);
+        y += gap;
+        if st.format == 1 {
+            let names: Vec<&str> = GIF_SIZES.iter().map(|a| a.0).collect();
+            ui.segmented(d2d, id("gifsize"), row(&mut y, ui.px(32.0)), &names, &mut st.gif_size);
+            y += gap * 0.6;
+            let names: Vec<&str> = GIF_FPS.iter().map(|a| a.0).collect();
+            ui.segmented(d2d, id("giffps"), row(&mut y, ui.px(32.0)), &names, &mut st.gif_fps);
+            y += gap * 0.4;
+            ui.text(d2d, row(&mut y, ui.px(18.0)), "Silent, loops forever. Smaller size/fps = smaller file.", 11.5, W_NORMAL, rgba(FAINT, 1.0), Align::Left);
+        } else {
+            let names: Vec<&str> = RESOLUTIONS.iter().map(|a| a.0).collect();
+            ui.segmented(d2d, id("res"), row(&mut y, ui.px(32.0)), &names, &mut st.resolution);
+        }
+        y += ui.px(22.0);
+
         ui.section(d2d, row(&mut y, ui.px(24.0)), "Background");
         let cols = 4;
         let sw = (w - gap * (cols - 1) as f32) / cols as f32;
@@ -988,10 +1006,6 @@ impl Editor {
         ui.text(d2d, row(&mut y, ui.px(20.0)), "Aspect ratio", 12.5, W_NORMAL, rgba(MUTED, 1.0), Align::Left);
         let names: Vec<&str> = ASPECTS.iter().map(|a| a.0).collect();
         ui.segmented(d2d, id("aspect"), row(&mut y, ui.px(32.0)), &names, &mut st.aspect);
-        y += gap;
-        ui.text(d2d, row(&mut y, ui.px(20.0)), "Export resolution", 12.5, W_NORMAL, rgba(MUTED, 1.0), Align::Left);
-        let names: Vec<&str> = RESOLUTIONS.iter().map(|a| a.0).collect();
-        ui.segmented(d2d, id("res"), row(&mut y, ui.px(32.0)), &names, &mut st.resolution);
         y += ui.px(22.0);
 
         ui.section(d2d, row(&mut y, ui.px(24.0)), "Cursor");

@@ -15,7 +15,6 @@ use crate::util::{Ctx, Res, secs_to_hns};
 pub struct ExportJob {
     pub progress: Arc<AtomicU32>, // 0..=10000
     pub cancel: Arc<AtomicBool>,
-    pub out: PathBuf,
     thread: Option<std::thread::JoinHandle<Res<PathBuf>>>,
 }
 
@@ -50,8 +49,8 @@ pub fn output_path(p: &Project) -> PathBuf {
 pub fn start(p: Project) -> ExportJob {
     let progress = Arc::new(AtomicU32::new(0));
     let cancel = Arc::new(AtomicBool::new(false));
-    let out = output_path(&p);
-    let (pr, ca, o) = (progress.clone(), cancel.clone(), out.clone());
+    let o = output_path(&p);
+    let (pr, ca) = (progress.clone(), cancel.clone());
     let thread = std::thread::Builder::new()
         .name("export".into())
         .spawn(move || {
@@ -62,7 +61,7 @@ pub fn start(p: Project) -> ExportJob {
             r.map(|_| o)
         })
         .ok();
-    ExportJob { progress, cancel, out, thread }
+    ExportJob { progress, cancel, thread }
 }
 
 pub fn run(p: &Project, out: &std::path::Path, progress: &AtomicU32, cancel: &AtomicBool) -> Res<()> {

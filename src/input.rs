@@ -247,25 +247,6 @@ pub enum CursorKind {
     No = 10,
 }
 
-impl CursorKind {
-    pub fn from_i32(v: i32) -> CursorKind {
-        use CursorKind::*;
-        match v {
-            -1 => Hidden,
-            1 => IBeam,
-            2 => Hand,
-            3 => Wait,
-            4 => Cross,
-            5 => SizeAll,
-            6 => SizeWE,
-            7 => SizeNS,
-            8 => SizeNWSE,
-            9 => SizeNESW,
-            10 => No,
-            _ => Arrow,
-        }
-    }
-}
 
 pub struct CursorSampler {
     known: Vec<(isize, CursorKind)>,

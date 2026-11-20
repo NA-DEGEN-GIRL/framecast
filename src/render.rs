@@ -3,7 +3,6 @@
 //! camera zoom/pan and zoom motion blur. Pass 2 (Direct2D): cursor, click effects,
 //! keystroke badges.
 
-use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::*;

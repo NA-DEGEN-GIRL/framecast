@@ -52,7 +52,6 @@ pub struct Encoder {
     _mgr: IMFDXGIDeviceManager,
     ring: Vec<ID3D11Texture2D>,
     next: usize,
-    pub frame_hns: i64,
     submitted: u64,
 }
 
@@ -107,7 +106,6 @@ impl Encoder {
                 _mgr: mgr,
                 ring,
                 next: 0,
-                frame_hns: 10_000_000 / cfg.fps as i64,
                 submitted: 0,
             })
         }
@@ -158,10 +156,6 @@ impl Encoder {
 pub struct Decoder {
     reader: IMFSourceReader,
     _mgr: IMFDXGIDeviceManager,
-    pub width: u32,
-    pub height: u32,
-    pub duration: f64,
-    pub fps: f64,
     /// Our own mip-mapped copy of the current frame (good quality when downscaled).
     pub frame: Option<ID3D11Texture2D>,
     pub frame_srv: Option<ID3D11ShaderResourceView>,
@@ -187,22 +181,9 @@ impl Decoder {
             t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).ctx("major")?;
             t.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_ARGB32).ctx("subtype")?;
             reader.SetCurrentMediaType(vs, None, &t).ctx("SetCurrentMediaType")?;
-            let cur = reader.GetCurrentMediaType(vs).ctx("current type")?;
-            let size = cur.GetUINT64(&MF_MT_FRAME_SIZE).ctx("frame size")?;
-            let rate = cur.GetUINT64(&MF_MT_FRAME_RATE).unwrap_or(pack(60, 1));
-            let fps = (rate >> 32) as f64 / ((rate & 0xffff_ffff) as f64).max(1.0);
-            let dur = reader
-                .GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)
-                .ok()
-                .and_then(|v| u64::try_from(&v).ok())
-                .unwrap_or(0);
             Ok(Decoder {
                 reader,
                 _mgr: mgr,
-                width: (size >> 32) as u32,
-                height: (size & 0xffff_ffff) as u32,
-                duration: dur as f64 / 1e7,
-                fps,
                 frame: None,
                 frame_srv: None,
                 frame_time: -1,

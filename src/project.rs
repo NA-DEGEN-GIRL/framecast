@@ -333,9 +333,6 @@ pub struct Frame {
     pub cursor_y: f32,
     pub cursor_alpha: f32,
     pub cursor_kind: i32,
-    /// cursor velocity in source px per second (drives motion blur)
-    pub cursor_vx: f32,
-    pub cursor_vy: f32,
     pub pressed: f32, // 0..1 button press amount
     pub cam_speed: f32,
 }
@@ -475,8 +472,6 @@ impl Motion {
             cursor_y: mix(u0, u1, 1),
             cursor_alpha: mix(u0, u1, 2),
             cursor_kind: kind,
-            cursor_vx: (u1[0] - u0[0]) * r,
-            cursor_vy: (u1[1] - u0[1]) * r,
             pressed: pressed.clamp(0.0, 1.0),
             cam_speed: pan + (c1[2] - c0[2]).abs() * r,
         }

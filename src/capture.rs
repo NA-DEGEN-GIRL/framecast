@@ -19,7 +19,6 @@ use crate::util::{Ctx, Res};
 #[derive(Clone, Debug)]
 pub struct Monitor {
     pub handle: isize,
-    pub name: String,
     pub rect: RECT,
     pub primary: bool,
 }
@@ -40,12 +39,8 @@ pub fn monitors() -> Vec<Monitor> {
             let mut info = MONITORINFOEXW::default();
             info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
             if GetMonitorInfoW(h, &mut info.monitorInfo as *mut _ as *mut MONITORINFO).as_bool() {
-                let n = info.szDevice.iter().position(|&c| c == 0).unwrap_or(info.szDevice.len());
-                let raw = String::from_utf16_lossy(&info.szDevice[..n]);
-                let name = raw.trim_start_matches("\\\\.\\").replace("DISPLAY", "Display ");
                 list.push(Monitor {
                     handle: h.0 as isize,
-                    name,
                     rect: info.monitorInfo.rcMonitor,
                     primary: info.monitorInfo.dwFlags & windows::Win32::UI::WindowsAndMessaging::MONITORINFOF_PRIMARY != 0,
                 });

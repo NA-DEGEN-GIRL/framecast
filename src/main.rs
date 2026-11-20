@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// A misspelled/unimported constant in a `match` silently becomes a catch-all binding.
+#![deny(unreachable_patterns)]
 
+mod app;
 mod capture;
 mod d2d;
 mod export;
@@ -10,7 +13,9 @@ mod media;
 mod project;
 mod recorder;
 mod render;
+mod ui;
 mod util;
+mod window;
 
 use util::Res;
 
@@ -53,6 +58,30 @@ fn main() {
             Err(e) => {
                 log!("recording failed: {e}");
                 std::process::exit(2);
+            }
+        }
+    }
+    match app::App::new() {
+        Ok(mut a) => {
+            if args.get(1).map(String::as_str) == Some("--open") {
+                if let Some(d) = args.get(2) {
+                    a.open_project(d.into());
+                }
+            }
+            a.run()
+        }
+        Err(e) => {
+            log!("startup failed: {e}");
+            let msg = util::wide(&format!("Framecast couldn't start:
+{e}"));
+            let title = util::wide("Framecast");
+            unsafe {
+                windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
+                    None,
+                    windows::core::PCWSTR(msg.as_ptr()),
+                    windows::core::PCWSTR(title.as_ptr()),
+                    windows::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
+                );
             }
         }
     }

@@ -28,7 +28,6 @@ pub struct RecordOptions {
 
 pub struct ActiveRecording {
     pub stop: Arc<AtomicBool>,
-    pub frames: Arc<AtomicU64>,
     pub started_hns: i64,
     thread: Option<JoinHandle<Res<PathBuf>>>,
 }
@@ -69,7 +68,7 @@ pub fn start(opts: RecordOptions) -> Res<ActiveRecording> {
         .ctx("spawn recorder")?;
     // Wait until capture actually started so the UI timer matches the video.
     let started_hns = rx.recv().map_err(|_| "recorder failed to start".to_string())??;
-    Ok(ActiveRecording { stop, frames, started_hns, thread: Some(thread) })
+    Ok(ActiveRecording { stop, started_hns, thread: Some(thread) })
 }
 
 fn record_thread(

@@ -64,12 +64,6 @@ impl Json {
             _ => None,
         }
     }
-    pub fn as_str(&self) -> Option<&str> {
-        match self {
-            Json::Str(s) => Some(s),
-            _ => None,
-        }
-    }
 
     pub fn to_string(&self) -> String {
         let mut s = String::new();
@@ -174,7 +168,8 @@ impl From<f64> for Json {
 }
 impl From<f32> for Json {
     fn from(v: f32) -> Self {
-        Json::Num(v as f64)
+        // Go through f32's shortest decimal form so 0.06f32 saves as 0.06, not 0.0599999986.
+        Json::Num(v.to_string().parse().unwrap_or(v as f64))
     }
 }
 impl From<i64> for Json {

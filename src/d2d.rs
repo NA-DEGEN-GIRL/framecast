@@ -7,7 +7,7 @@ use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGISurface};
 use windows::core::Interface;
-use windows_numerics::{Matrix3x2, Vector2};
+use windows_numerics::Vector2;
 
 use crate::gpu::Gpu;
 use crate::util::{Ctx, Res, wide};
@@ -76,6 +76,11 @@ impl D2d {
     /// A bitmap D2D can render into.
     pub fn target_for(&self, tex: &ID3D11Texture2D) -> Res<ID2D1Bitmap1> {
         self.bitmap(tex, D2D1_BITMAP_OPTIONS_TARGET)
+    }
+
+    /// Render target for a swap-chain back buffer (not sampleable).
+    pub fn swap_target_for(&self, tex: &ID3D11Texture2D) -> Res<ID2D1Bitmap1> {
+        self.bitmap(tex, D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW)
     }
 
     /// A bitmap D2D can draw from (texture needs SHADER_RESOURCE binding).
@@ -154,7 +159,4 @@ impl D2d {
         unsafe { self.factory.CreateRoundedRectangleGeometry(&rrect(r, rad)) }.ctx("rrect geom").and_then(|g| g.cast().ctx("cast"))
     }
 
-    pub fn set_transform(&self, m: Matrix3x2) {
-        unsafe { self.dc.SetTransform(&m) };
-    }
 }

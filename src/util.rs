@@ -49,10 +49,6 @@ pub fn now_hns() -> i64 {
     (c / f) * 10_000_000 + (c % f) * 10_000_000 / f
 }
 
-pub fn hns_to_secs(t: i64) -> f64 {
-    t as f64 / 1e7
-}
-
 pub fn secs_to_hns(s: f64) -> i64 {
     (s * 1e7).round() as i64
 }
@@ -109,13 +105,4 @@ pub fn stamp() -> String {
         "{:04}-{:02}-{:02}_{:02}-{:02}-{:02}",
         t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
     )
-}
-
-pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
-}
-
-pub fn smoothstep(t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
 }

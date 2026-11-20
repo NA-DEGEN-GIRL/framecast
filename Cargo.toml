@@ -52,6 +52,10 @@ features = [
     "Win32_UI_WindowsAndMessaging",
 ]
 
+# Same crate the `windows` crate already depends on (Matrix3x2 / Vector2 for Direct2D).
+[dependencies.windows-numerics]
+version = "=0.3.1"
+
 [profile.release]
 opt-level = 3
 lto = "fat"

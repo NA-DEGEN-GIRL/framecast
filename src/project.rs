@@ -17,6 +17,7 @@ pub struct CursorSample {
     pub kind: i32,
 }
 
+#[derive(Clone)]
 pub struct Recording {
     pub width: u32,
     pub height: u32,
@@ -185,6 +186,7 @@ pub struct ZoomSeg {
     pub scale: f32,
 }
 
+#[derive(Clone)]
 pub struct Project {
     pub dir: std::path::PathBuf,
     pub rec: Recording,
@@ -396,7 +398,7 @@ impl Motion {
 
         // Camera: zoom springs toward the active segment's scale and follows the
         // smoothed cursor with a dead zone so the view doesn't jitter.
-        let omega_zoom = 3.5 + 7.0 * s.zoom_speed;
+        let omega_zoom = 2.5 + 5.0 * s.zoom_speed;
         let omega_pan = omega_zoom * 0.8;
         let mut cam = Vec::with_capacity(n);
         let (mut sc, mut vs) = (1.0f32, 0.0f32);

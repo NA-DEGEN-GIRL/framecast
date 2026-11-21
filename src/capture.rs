@@ -23,6 +23,8 @@ use crate::util::{Ctx, Res};
 pub struct Monitor {
     pub handle: isize,
     pub rect: RECT,
+    /// Monitor rect minus the taskbar / docked bars.
+    pub work: RECT,
     pub primary: bool,
 }
 
@@ -45,6 +47,7 @@ pub fn monitors() -> Vec<Monitor> {
                 list.push(Monitor {
                     handle: h.0 as isize,
                     rect: info.monitorInfo.rcMonitor,
+                    work: info.monitorInfo.rcWork,
                     primary: info.monitorInfo.dwFlags & windows::Win32::UI::WindowsAndMessaging::MONITORINFOF_PRIMARY != 0,
                 });
             }

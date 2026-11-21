@@ -15,6 +15,7 @@ use crate::capture::{self, Monitor, Target};
 use crate::d2d::{D2d, rgba};
 use crate::export::{self, ExportJob};
 use crate::gpu::Gpu;
+use crate::identify::Identify;
 use crate::input::{PAUSE_HOTKEY_LABEL, STOP_HOTKEY_LABEL};
 use crate::log;
 use crate::media::Decoder;
@@ -47,6 +48,8 @@ pub struct App {
     screen: Screen,
     monitors: Vec<Monitor>,
     mon_sel: usize,
+    /// Display number badges shown by "Identify" on the home screen.
+    identify: Option<Identify>,
     /// 0 full screen, 1 window, 2 area
     mode_sel: usize,
     fps_sel: usize,
@@ -106,6 +109,7 @@ impl App {
             screen: Screen::Home,
             monitors,
             mon_sel: 0,
+            identify: None,
             mode_sel: 0,
             fps_sel: 1,
             countdown: true,
@@ -152,6 +156,7 @@ impl App {
         busy |= self.select_frame()?;
         // Floating bar (countdown / recording).
         busy |= self.bar_frame()?;
+        busy |= self.identify_frame()?;
 
         let inp = window::take_input(self.main.hwnd);
         if inp.resized {
@@ -219,6 +224,7 @@ impl App {
     fn apply(&mut self, a: Action) -> Res<()> {
         match a {
             Action::StartRecording => {
+                self.identify = None;
                 let Some(mon) = self.monitors.get(self.mon_sel).cloned() else {
                     self.toast("No display found", true);
                     return Ok(());
@@ -257,6 +263,21 @@ impl App {
                 self.recents = project::recent_projects();
                 self.screen = Screen::Home;
             }
+            Action::Identify => {
+                if self.identify.take().is_none() {
+                    // Displays may have been plugged in / rearranged since startup.
+                    let cur = self.monitors.get(self.mon_sel).map(|m| m.handle);
+                    self.monitors = capture::monitors();
+                    self.mon_sel = cur
+                        .and_then(|h| self.monitors.iter().position(|m| m.handle == h))
+                        .unwrap_or(0)
+                        .min(self.monitors.len().saturating_sub(1));
+                    match Identify::show(&self.gpu, &self.monitors) {
+                        Ok(i) => self.identify = Some(i),
+                        Err(e) => self.toast(&format!("Couldn't show display numbers: {e}"), true),
+                    }
+                }
+            }
             Action::OpenFolder(p) => open_in_explorer(&p, false),
             Action::Reveal(p) => open_in_explorer(&p, true),
             Action::PickBackground => {
@@ -287,6 +308,22 @@ impl App {
         self.bar = Some(bar);
         self.screen = Screen::Countdown { until: Instant::now() + Duration::from_secs(3), opts };
         Ok(())
+    }
+
+    /// Display number badges: dismiss when expired or when leaving Home; a click selects that display.
+    fn identify_frame(&mut self) -> Res<bool> {
+        let Some(ident) = self.identify.as_mut() else { return Ok(false) };
+        if ident.expired() || !matches!(self.screen, Screen::Home) {
+            self.identify = None;
+            return Ok(true);
+        }
+        match ident.frame(&self.d2d, self.mon_sel, self.t0.elapsed().as_secs_f64())? {
+            Some(i) => {
+                self.mon_sel = i;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 
     fn select_frame(&mut self) -> Res<bool> {
@@ -501,6 +538,14 @@ impl App {
         let (_, c) = c.cut_top(ui.px(16.0));
         let (r, c) = c.cut_top(ui.px(20.0));
         ui.section(d2d, r, "Display");
+        let (btn, _) = r.cut_right(ui.px(132.0));
+        let btn = Rect::new(btn.x, btn.y - ui.px(5.0), btn.w, btn.h + ui.px(8.0));
+        let showing = self.identify.is_some();
+        if !self.monitors.is_empty()
+            && ui.button(d2d, id("identify"), btn, if showing { "Hide numbers" } else { "Identify displays" }, ButtonKind::Secondary)
+        {
+            action = Some(Action::Identify);
+        }
         let (r, c) = c.cut_top(ui.px(38.0));
         let names: Vec<String> = self
             .monitors
@@ -609,6 +654,8 @@ enum Action {
     OpenFolder(PathBuf),
     Reveal(PathBuf),
     PickBackground,
+    /// Toggle the display number badges.
+    Identify,
 }
 
 #[derive(Clone, PartialEq)]
